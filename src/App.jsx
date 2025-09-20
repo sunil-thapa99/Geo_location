@@ -9,7 +9,8 @@ import {
     updateDoc,
     doc,
 } from "firebase/firestore";
-import { db } from "./firebase";
+import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
+import { db, storage } from "./firebase";
 
 function App() {
     const [location, setLocation] = useState(null);
@@ -20,6 +21,15 @@ function App() {
     const [username, setUsername] = useState("");
     const [saving, setSaving] = useState(false);
     const [saveMessage, setSaveMessage] = useState("");
+
+    // Audio recording states
+    const [isRecording, setIsRecording] = useState(false);
+    const [isPaused, setIsPaused] = useState(false);
+    const [recordingTime, setRecordingTime] = useState(0);
+    const [audioBlob, setAudioBlob] = useState(null);
+    const [audioUrl, setAudioUrl] = useState(null);
+    const [mediaRecorder, setMediaRecorder] = useState(null);
+    const [audioChunks, setAudioChunks] = useState([]);
 
     // Function to detect device information
     const detectDeviceInfo = () => {
@@ -72,6 +82,7 @@ function App() {
     // Generate device info when component mounts
     useEffect(() => {
         detectDeviceInfo();
+        checkFirebaseConfig();
     }, []);
 
     const getCurrentLocation = () => {
@@ -136,6 +147,128 @@ function App() {
             });
     };
 
+    // Audio recording functions
+    const startRecording = async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: true,
+            });
+            const recorder = new MediaRecorder(stream);
+            const chunks = [];
+
+            recorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    chunks.push(event.data);
+                }
+            };
+
+            recorder.onstop = () => {
+                const blob = new Blob(chunks, { type: "audio/webm" });
+                setAudioBlob(blob);
+                const url = URL.createObjectURL(blob);
+                setAudioUrl(url);
+                setAudioChunks(chunks);
+                stream.getTracks().forEach((track) => track.stop());
+            };
+
+            recorder.start();
+            setMediaRecorder(recorder);
+            setIsRecording(true);
+            setIsPaused(false);
+            setRecordingTime(0);
+            setAudioChunks([]);
+        } catch (error) {
+            console.error("Error starting recording:", error);
+            alert("Error accessing microphone. Please check permissions.");
+        }
+    };
+
+    const stopRecording = () => {
+        if (mediaRecorder && isRecording) {
+            mediaRecorder.stop();
+            setIsRecording(false);
+            setIsPaused(false);
+        }
+    };
+
+    const pauseRecording = () => {
+        if (mediaRecorder && isRecording && !isPaused) {
+            mediaRecorder.pause();
+            setIsPaused(true);
+        }
+    };
+
+    const resumeRecording = () => {
+        if (mediaRecorder && isRecording && isPaused) {
+            mediaRecorder.resume();
+            setIsPaused(false);
+        }
+    };
+
+    const clearRecording = () => {
+        setAudioBlob(null);
+        setAudioUrl(null);
+        setRecordingTime(0);
+        setAudioChunks([]);
+        if (audioUrl) {
+            URL.revokeObjectURL(audioUrl);
+        }
+    };
+
+    // Timer effect for recording
+    useEffect(() => {
+        let interval = null;
+        if (isRecording && !isPaused) {
+            interval = setInterval(() => {
+                setRecordingTime((time) => time + 1);
+            }, 1000);
+        } else if (!isRecording || isPaused) {
+            clearInterval(interval);
+        }
+        return () => clearInterval(interval);
+    }, [isRecording, isPaused]);
+
+    const formatTime = (seconds) => {
+        const mins = Math.floor(seconds / 60);
+        const secs = seconds % 60;
+        return `${mins.toString().padStart(2, "0")}:${secs
+            .toString()
+            .padStart(2, "0")}`;
+    };
+
+    // Check Firebase configuration
+    const checkFirebaseConfig = () => {
+        const config = {
+            apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+            authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+            projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+            storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+            messagingSenderId: import.meta.env
+                .VITE_FIREBASE_MESSAGING_SENDER_ID,
+            appId: import.meta.env.VITE_FIREBASE_APP_ID,
+        };
+
+        console.log("Firebase Config Check:", {
+            hasApiKey: !!config.apiKey,
+            hasAuthDomain: !!config.authDomain,
+            hasProjectId: !!config.projectId,
+            hasStorageBucket: !!config.storageBucket,
+            hasMessagingSenderId: !!config.messagingSenderId,
+            hasAppId: !!config.appId,
+        });
+
+        const missingConfigs = Object.entries(config)
+            .filter(([key, value]) => !value || value.includes("your_"))
+            .map(([key]) => key);
+
+        if (missingConfigs.length > 0) {
+            console.error("Missing Firebase configuration:", missingConfigs);
+            return false;
+        }
+
+        return true;
+    };
+
     const saveToDatabase = async () => {
         if (!location) {
             setSaveMessage("Please get your location first!");
@@ -151,6 +284,27 @@ function App() {
         setSaveMessage("");
 
         try {
+            let audioUrl = null;
+
+            // Upload audio file if available
+            if (audioBlob) {
+                console.log("Starting audio upload...", {
+                    blobSize: audioBlob.size,
+                    blobType: audioBlob.type,
+                    username: username.trim(),
+                });
+
+                const audioFileName = `audio_${username.trim()}_${Date.now()}.webm`;
+                const audioRef = ref(storage, `audio/${audioFileName}`);
+
+                console.log("Uploading to Firebase Storage:", audioFileName);
+                await uploadBytes(audioRef, audioBlob);
+                console.log("Audio uploaded successfully");
+
+                audioUrl = await getDownloadURL(audioRef);
+                console.log("Audio URL generated:", audioUrl);
+            }
+
             const locationData = {
                 username: username.trim(),
                 name: editableName.trim() || deviceInfo.name,
@@ -159,6 +313,8 @@ function App() {
                 accuracy: location.accuracy,
                 timestamp: location.timestamp,
                 savedAt: new Date().toISOString(),
+                audioUrl: audioUrl,
+                hasAudio: !!audioBlob,
             };
 
             // 🔎 Check if username already exists
@@ -173,17 +329,46 @@ function App() {
                 const existingDoc = querySnapshot.docs[0];
                 const docRef = doc(db, "locations", existingDoc.id);
                 await updateDoc(docRef, locationData);
-                setSaveMessage("✅ Location updated successfully!");
+                setSaveMessage("✅ Location and audio updated successfully!");
             } else {
                 // create new document
                 await addDoc(collection(db, "locations"), locationData);
-                setSaveMessage("✅ Location saved successfully!");
+                setSaveMessage("✅ Location and audio saved successfully!");
             }
         } catch (error) {
             console.error("Error saving location:", error);
-            setSaveMessage(
-                "❌ Failed to save location. Check Firebase config!"
-            );
+
+            // More specific error messages
+            let errorMessage = "❌ Failed to save location.";
+
+            if (error.code === "storage/unauthorized") {
+                errorMessage =
+                    "❌ Storage access denied. Check Firebase Storage rules.";
+            } else if (error.code === "storage/canceled") {
+                errorMessage = "❌ Upload was canceled.";
+            } else if (error.code === "storage/unknown") {
+                errorMessage =
+                    "❌ Unknown storage error. Check Firebase config.";
+            } else if (error.code === "storage/invalid-argument") {
+                errorMessage = "❌ Invalid audio file format.";
+            } else if (error.code === "storage/object-not-found") {
+                errorMessage = "❌ Storage object not found.";
+            } else if (
+                error.message.includes("CORS") ||
+                error.message.includes("cors")
+            ) {
+                errorMessage =
+                    "❌ CORS Error: Update Firebase Storage rules to allow public access.";
+            } else if (error.message.includes("Firebase")) {
+                errorMessage = `❌ Firebase error: ${error.message}`;
+            } else if (error.message.includes("network")) {
+                errorMessage =
+                    "❌ Network error. Check your internet connection.";
+            } else {
+                errorMessage = `❌ Error: ${error.message}`;
+            }
+
+            setSaveMessage(errorMessage);
         } finally {
             setSaving(false);
         }
@@ -192,8 +377,8 @@ function App() {
     return (
         <div className="app">
             <header className="app-header">
-                <h1>📍 Location Finder</h1>
-                <p>Get your current coordinates instantly</p>
+                <h1>📍 Location & Audio Recorder</h1>
+                <p>Get your current coordinates and record audio</p>
             </header>
 
             <main className="main-content">
@@ -204,6 +389,75 @@ function App() {
                 >
                     {loading ? "Getting Location..." : "Get My Location"}
                 </button>
+
+                {/* Audio Recording Section */}
+                <div className="audio-section">
+                    <h3>🎤 Audio Recording</h3>
+
+                    {!isRecording && !audioBlob && (
+                        <button
+                            className="record-btn start"
+                            onClick={startRecording}
+                        >
+                            🎤 Start Recording
+                        </button>
+                    )}
+
+                    {isRecording && (
+                        <div className="recording-controls">
+                            <div className="recording-timer">
+                                <span className="timer-icon">⏱️</span>
+                                <span className="timer-text">
+                                    {formatTime(recordingTime)}
+                                </span>
+                            </div>
+                            <div className="recording-buttons">
+                                {!isPaused ? (
+                                    <button
+                                        className="record-btn pause"
+                                        onClick={pauseRecording}
+                                    >
+                                        ⏸️ Pause
+                                    </button>
+                                ) : (
+                                    <button
+                                        className="record-btn resume"
+                                        onClick={resumeRecording}
+                                    >
+                                        ▶️ Resume
+                                    </button>
+                                )}
+                                <button
+                                    className="record-btn stop"
+                                    onClick={stopRecording}
+                                >
+                                    ⏹️ Stop
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {audioBlob && (
+                        <div className="audio-playback">
+                            <h4>🎵 Recorded Audio</h4>
+                            <audio
+                                controls
+                                src={audioUrl}
+                                className="audio-player"
+                            >
+                                Your browser does not support the audio element.
+                            </audio>
+                            <div className="audio-actions">
+                                <button
+                                    className="action-btn"
+                                    onClick={clearRecording}
+                                >
+                                    🗑️ Clear Recording
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </div>
 
                 {error && (
                     <div className="error-message">
@@ -325,6 +579,8 @@ function App() {
                             >
                                 {saving
                                     ? "Saving..."
+                                    : audioBlob
+                                    ? "💾 Save Location & Audio"
                                     : "💾 Save/Update Location"}
                             </button>
                             {saveMessage && (
