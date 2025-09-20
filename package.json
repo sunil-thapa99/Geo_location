@@ -12,7 +12,7 @@
         "dev:full": "concurrently \"npm run db\" \"npm run dev\""
     },
     "dependencies": {
-        "axios": "^1.12.2",
+        "firebase": "^12.3.0",
         "react": "^19.1.1",
         "react-dom": "^19.1.1"
     },

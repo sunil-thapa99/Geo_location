@@ -24,3 +24,6 @@ dist-ssr
 *.sw?
 
 db.json
+
+*.env
+*.env.local

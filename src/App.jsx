@@ -1,6 +1,15 @@
 import { useState, useEffect } from "react";
-import axios from "axios";
 import "./App.css";
+import {
+    collection,
+    query,
+    where,
+    getDocs,
+    addDoc,
+    updateDoc,
+    doc,
+} from "firebase/firestore";
+import { db } from "./firebase";
 
 function App() {
     const [location, setLocation] = useState(null);
@@ -152,37 +161,28 @@ function App() {
                 savedAt: new Date().toISOString(),
             };
 
-            // Check if location with this username already exists
-            const existingResponse = await axios.get(
-                `http://localhost:3001/locations?username=${encodeURIComponent(
-                    username.trim()
-                )}`
+            // 🔎 Check if username already exists
+            const q = query(
+                collection(db, "locations"),
+                where("username", "==", username.trim())
             );
+            const querySnapshot = await getDocs(q);
 
-            if (existingResponse.data.length > 0) {
-                // Update existing location
-                const existingLocation = existingResponse.data[0];
-                await axios.put(
-                    `http://localhost:3001/locations/${existingLocation.id}`,
-                    locationData
-                );
+            if (!querySnapshot.empty) {
+                // update existing document
+                const existingDoc = querySnapshot.docs[0];
+                const docRef = doc(db, "locations", existingDoc.id);
+                await updateDoc(docRef, locationData);
                 setSaveMessage("✅ Location updated successfully!");
             } else {
-                // Create new location
-                await axios.post(
-                    `http://localhost:3001/locations`,
-                    locationData
-                );
+                // create new document
+                await addDoc(collection(db, "locations"), locationData);
                 setSaveMessage("✅ Location saved successfully!");
             }
         } catch (error) {
             console.error("Error saving location:", error);
-            console.error(
-                "Error details:",
-                error.response?.data || error.message
-            );
             setSaveMessage(
-                "❌ Failed to save location. Make sure the database server is running!"
+                "❌ Failed to save location. Check Firebase config!"
             );
         } finally {
             setSaving(false);

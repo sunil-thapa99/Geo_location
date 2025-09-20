@@ -69,7 +69,7 @@ npm run dev:full
 
 ### API Endpoints
 
-The json-server provides the following REST API endpoints:
+The Firebase server provides the following REST API endpoints:
 
 -   `GET /locations` - Get all saved locations
 -   `GET /locations?id={id}` - Get location by ID
@@ -81,8 +81,8 @@ The json-server provides the following REST API endpoints:
 
 -   React 19
 -   Vite
--   Axios (for API calls)
--   JSON Server (for local database)
+-   Firebase (for API calls)
+-   Firestore Database
 -   CSS3 with modern styling
 
 ## Project Structure
@@ -93,8 +93,7 @@ src/
 ├── App.css          # Application styles
 ├── main.jsx         # Application entry point
 └── index.css        # Global styles
-
-db.json              # JSON database file
+****
 package.json         # Project dependencies and scripts
 ```
 
@@ -103,7 +102,5 @@ package.json         # Project dependencies and scripts
 The application uses:
 
 -   **Frontend**: React with Vite for fast development
--   **Backend**: JSON Server for REST API simulation
--   **Database**: JSON file-based storage
-
-For production deployment, you would typically replace JSON Server with a real database like PostgreSQL, MongoDB, or Firebase.
+-   **Backend**: Firebase Server for REST API simulation
+-   **Database**: Firestore Database
