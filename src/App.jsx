@@ -294,7 +294,12 @@ function App() {
                     username: username.trim(),
                 });
 
-                const audioFileName = `audio_${username.trim()}_${Date.now()}.webm`;
+                // Create filename using lat/lon with 3 decimal places (truncated, not rounded)
+                const latStr = Math.trunc(location.latitude * 1000) / 1000;
+                const lonStr = Math.trunc(location.longitude * 1000) / 1000;
+                const latStrFormatted = latStr.toString().replace(".", "p");
+                const lonStrFormatted = lonStr.toString().replace(".", "p");
+                const audioFileName = `audio_${username.trim()}_${latStrFormatted}_${lonStrFormatted}.webm`;
                 const audioRef = ref(storage, `audio/${audioFileName}`);
 
                 console.log("Uploading to Firebase Storage:", audioFileName);
