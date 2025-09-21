@@ -22,7 +22,9 @@ The application stores location data with the following structure:
     "longitude": -74.006,
     "accuracy": 10.5,
     "timestamp": "12/25/2023, 2:30:00 PM",
-    "savedAt": "2023-12-25T19:30:00.000Z"
+    "savedAt": "2023-12-25T19:30:00.000Z",
+    "hasAudio": True,
+    "audioURL": "https://......."
 }
 ```
 
@@ -41,13 +43,7 @@ The application stores location data with the following structure:
 npm install
 ```
 
-2. Start the database server:
-
-```bash
-npm run db
-```
-
-3. In a new terminal, start the development server:
+2. In a new terminal, start the development server:
 
 ```bash
 npm run dev
