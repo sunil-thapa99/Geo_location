@@ -6,6 +6,7 @@ import {
     where,
     getDocs,
     addDoc,
+    setDoc,
     updateDoc,
     doc,
     onSnapshot,
@@ -55,11 +56,78 @@ function App() {
     const [recordingIntervalId, setRecordingIntervalId] = useState(null);
     const [autoRecordingCompleted, setAutoRecordingCompleted] = useState(false);
 
+    // Clock state to show current time on the right side
+    const [currentTime, setCurrentTime] = useState(new Date());
+
+    useEffect(() => {
+        const id = setInterval(() => {
+            setCurrentTime(new Date());
+        }, 1000);
+        return () => clearInterval(id);
+    }, []);
+
+    // Computed flag: has the scheduled session start time passed?
+    const sessionHasStarted = sessionStartTimeData
+        ? new Date(sessionStartTimeData).getTime() <= currentTime.getTime()
+        : false;
+
     // Helper function to get current time + 5 minutes in HH:MM format
     const getCurrentTimePlusFive = () => {
         const now = new Date();
         now.setMinutes(now.getMinutes() + 5);
         return now.toTimeString().slice(0, 5); // Get HH:MM format
+    };
+
+    // Request location and microphone permissions and return location info
+    const requestLocationAndMic = async () => {
+        // request location via Promise wrapper
+        const getPosition = () =>
+            new Promise((resolve, reject) => {
+                if (!navigator.geolocation) {
+                    reject(new Error('Geolocation not supported'));
+                    return;
+                }
+                navigator.geolocation.getCurrentPosition(
+                    (pos) => resolve(pos),
+                    (err) => reject(err),
+                    { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+                );
+            });
+
+        try {
+            const position = await getPosition();
+
+            // request microphone permission (prompt) - then stop tracks immediately
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                // stop tracks immediately - we only need permission
+                stream.getTracks().forEach((t) => t.stop());
+            } catch (micErr) {
+                // microphone permission denied or not available
+                console.warn('Microphone permission not granted or unavailable', micErr);
+                // still continue if location is available
+            }
+
+            return {
+                latitude: position.coords.latitude,
+                longitude: position.coords.longitude,
+                accuracy: position.coords.accuracy,
+                timestamp: new Date(position.timestamp).toISOString(),
+            };
+        } catch (err) {
+            throw err;
+        }
+    };
+
+    // Create a safe session document ID from a session name
+    const makeSessionId = (name) => {
+        if (!name) return "";
+        return name
+            .trim()
+            .toLowerCase()
+            .replace(/\s+/g, "-")
+            .replace(/[^a-z0-9\-_.]/g, "")
+            .slice(0, 80);
     };
 
     // Function to detect device information
@@ -128,24 +196,19 @@ function App() {
             autoRecordingCompleted
         )
             return;
-
-        const interval = setInterval(() => {
-            // Re-check the session data to trigger countdown if needed
-            if (
-                currentSession &&
-                !isAutoRecording &&
-                autoRecordCountdown === 0 &&
-                !autoRecordingCompleted
-            ) {
+        // Poll session document periodically to check start time and trigger countdown
+        const interval = setInterval(async () => {
+            try {
                 const sessionRef = doc(db, "sessions", currentSession);
-                getDoc(sessionRef).then((docSnapshot) => {
-                    if (docSnapshot.exists()) {
-                        const sessionData = docSnapshot.data();
-                        checkAutoRecordTime(sessionData.startTime);
-                    }
-                });
+                const sessionSnap = await getDoc(sessionRef);
+                if (sessionSnap.exists()) {
+                    const data = sessionSnap.data();
+                    checkAutoRecordTime(data.startTime);
+                }
+            } catch (err) {
+                console.error("Error checking session for auto-record:", err);
             }
-        }, 5000); // Check every 5 seconds
+        }, 5000);
 
         return () => clearInterval(interval);
     }, [
@@ -361,6 +424,34 @@ function App() {
             const sessionDateTime = new Date(today);
             sessionDateTime.setHours(parseInt(hours), parseInt(minutes), 0, 0);
 
+
+            const sessionIdFromName = makeSessionId(sessionName);
+
+            const sessionRef = doc(db, "sessions", sessionIdFromName);
+
+            // Check if a session with the same ID/name already exists
+            const existing = await getDoc(sessionRef);
+            if (existing.exists()) {
+                alert("A session with this name already exists. Choose a different name.");
+                return;
+            }
+
+            // Request creator's location and microphone permission
+            let creatorLocation = null;
+            try {
+                creatorLocation = await requestLocationAndMic();
+            } catch (err) {
+                alert("Please allow location access to create a session.");
+                return;
+            }
+            // set global location so Save to DB area can use it
+            setLocation({
+                latitude: creatorLocation.latitude,
+                longitude: creatorLocation.longitude,
+                accuracy: creatorLocation.accuracy,
+                timestamp: new Date(creatorLocation.timestamp).toLocaleString(),
+            });
+
             const sessionData = {
                 name: sessionName.trim(),
                 startTime: sessionDateTime.toISOString(),
@@ -372,23 +463,23 @@ function App() {
                         deviceName: editableName.trim() || deviceInfo.name,
                         joinedAt: new Date().toISOString(),
                         isActive: true,
+                        location: creatorLocation,
                     },
                 ],
                 status: "active",
                 recordings: [],
             };
 
-            const docRef = await addDoc(
-                collection(db, "sessions"),
-                sessionData
-            );
-            setCurrentSession(docRef.id);
-            setSessionId(docRef.id);
+            // Use setDoc to create the document with the session name as ID
+            await setDoc(sessionRef, sessionData);
+
+            setCurrentSession(sessionIdFromName);
+            setSessionId(sessionIdFromName);
             setIsInSession(true);
             setAutoRecordingCompleted(false); // Reset auto-recording completion flag for new session
 
             // Start listening to session updates
-            listenToSession(docRef.id);
+            listenToSession(sessionIdFromName);
 
             // Automatically get location when creating session
             if (!location) {
@@ -396,7 +487,7 @@ function App() {
             }
 
             alert(
-                `Session "${sessionName}" created successfully! Session ID: ${docRef.id}`
+                `Session "${sessionName}" created successfully! Session ID/Name: ${sessionIdFromName}`
             );
         } catch (error) {
             console.error("Error creating session:", error);
@@ -411,42 +502,63 @@ function App() {
         }
 
         try {
-            const sessionRef = doc(db, "sessions", sessionId.trim());
+            // treat the entered sessionId as a session name; convert to slug
+            const sessionIdFromName = makeSessionId(sessionId.trim());
+            const sessionRef = doc(db, "sessions", sessionIdFromName);
 
-            // Check if session exists
-            const sessionDoc = await getDocs(
-                query(
-                    collection(db, "sessions"),
-                    where("__name__", "==", sessionId.trim())
-                )
-            );
-
-            if (sessionDoc.empty) {
-                alert("Session not found! Please check the session ID.");
+            const sessionDoc = await getDoc(sessionRef);
+            if (!sessionDoc.exists()) {
+                alert("Session not found! Please check the session name.");
                 return;
             }
 
-            // Add participant to session
+            // Prevent joining if session start time has already passed
+            const sessionStart = sessionDoc.data().startTime;
+            if (sessionStart) {
+                const startDate = new Date(sessionStart);
+                if (new Date().getTime() >= startDate.getTime()) {
+                    alert('Cannot join: session has already started or completed.');
+                    return;
+                }
+            }
+
+            // Request participant's location and microphone permission
+            let participantLocation = null;
+            try {
+                participantLocation = await requestLocationAndMic();
+            } catch (err) {
+                alert("Please allow location access to join the session.");
+                return;
+            }
+
+            // set global location state
+            setLocation({
+                latitude: participantLocation.latitude,
+                longitude: participantLocation.longitude,
+                accuracy: participantLocation.accuracy,
+                timestamp: new Date(participantLocation.timestamp).toLocaleString(),
+            });
+
+            // Add participant to session (read-modify-write)
             const participantData = {
                 username: username.trim() || "Anonymous",
                 deviceName: editableName.trim() || deviceInfo.name,
                 joinedAt: new Date().toISOString(),
                 isActive: true,
+                location: participantLocation,
             };
 
+            const currentParticipants = sessionDoc.data().participants || [];
             await updateDoc(sessionRef, {
-                participants: [
-                    ...sessionDoc.docs[0].data().participants,
-                    participantData,
-                ],
+                participants: [...currentParticipants, participantData],
             });
 
-            setCurrentSession(sessionId.trim());
+            setCurrentSession(sessionIdFromName);
             setIsInSession(true);
             setAutoRecordingCompleted(false); // Reset auto-recording completion flag for joined session
 
             // Start listening to session updates
-            listenToSession(sessionId.trim());
+            listenToSession(sessionIdFromName);
 
             // Automatically get location when joining session
             if (!location) {
@@ -465,16 +577,10 @@ function App() {
 
         try {
             const sessionRef = doc(db, "sessions", currentSession);
-            const sessionDoc = await getDocs(
-                query(
-                    collection(db, "sessions"),
-                    where("__name__", "==", currentSession)
-                )
-            );
+            const sessionSnapshot = await getDoc(sessionRef);
 
-            if (!sessionDoc.empty) {
-                const currentParticipants =
-                    sessionDoc.docs[0].data().participants;
+            if (sessionSnapshot.exists()) {
+                const currentParticipants = sessionSnapshot.data().participants || [];
                 const updatedParticipants = currentParticipants.map((p) =>
                     p.username === (username.trim() || "Anonymous")
                         ? { ...p, isActive: false }
@@ -654,16 +760,10 @@ function App() {
 
             // Add recording to session
             const sessionRef = doc(db, "sessions", currentSession);
-            const sessionDoc = await getDocs(
-                query(
-                    collection(db, "sessions"),
-                    where("__name__", "==", currentSession)
-                )
-            );
+            const sessionSnapshot = await getDoc(sessionRef);
 
-            if (!sessionDoc.empty) {
-                const currentRecordings =
-                    sessionDoc.docs[0].data().recordings || [];
+            if (sessionSnapshot.exists()) {
+                const currentRecordings = sessionSnapshot.data().recordings || [];
                 const newRecording = {
                     username: username.trim() || "Anonymous",
                     deviceName: editableName.trim() || deviceInfo.name,
@@ -835,13 +935,15 @@ function App() {
             </header>
 
             <main className="main-content">
-                <button
-                    className="get-location-btn"
-                    onClick={getCurrentLocation}
-                    disabled={loading}
-                >
-                    {loading ? "Getting Location..." : "Get My Location"}
-                </button>
+                {/* Get Location button removed; location is requested during Create/Join flows */}
+
+                {/* Inline clock placed below Get Location button */}
+                <div className="app-clock" aria-hidden="true">
+                    <div className="clock-badge">
+                        <span>🕒</span>
+                        <span className="clock-time">{currentTime.toLocaleTimeString()}</span>
+                    </div>
+                </div>
 
                 {/* Session Management Section */}
                 <div className="session-section">
@@ -862,6 +964,17 @@ function App() {
                                             setSessionName(e.target.value)
                                         }
                                         placeholder="Enter session name"
+                                        className="form-input"
+                                    />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="creator-username">Your Username:</label>
+                                    <input
+                                        type="text"
+                                        id="creator-username"
+                                        value={username}
+                                        onChange={(e) => setUsername(e.target.value)}
+                                        placeholder="Enter your username"
                                         className="form-input"
                                     />
                                 </div>
@@ -900,7 +1013,7 @@ function App() {
                             <div className="join-session">
                                 <div className="form-group">
                                     <label htmlFor="join-session-id">
-                                        Join Session ID:
+                                        Join Session Name:
                                     </label>
                                     <input
                                         type="text"
@@ -909,7 +1022,18 @@ function App() {
                                         onChange={(e) =>
                                             setSessionId(e.target.value)
                                         }
-                                        placeholder="Enter session ID"
+                                        placeholder="Enter session name"
+                                        className="form-input"
+                                    />
+                                </div>
+                                <div className="form-group">
+                                    <label htmlFor="join-username">Your Username:</label>
+                                    <input
+                                        type="text"
+                                        id="join-username"
+                                        value={username}
+                                        onChange={(e) => setUsername(e.target.value)}
+                                        placeholder="Enter your username"
                                         className="form-input"
                                     />
                                 </div>
@@ -926,7 +1050,7 @@ function App() {
                             <div className="session-info">
                                 <h4>📡 Active Session</h4>
                                 <p>
-                                    <strong>Session ID:</strong>{" "}
+                                    <strong>Session Name / ID:</strong>{" "}
                                     {currentSession}
                                 </p>
                                 <p>
@@ -937,16 +1061,7 @@ function App() {
                                         ).length
                                     }
                                 </p>
-                                <p>
-                                    <strong>Location:</strong>{" "}
-                                    {location
-                                        ? "✅ Active"
-                                        : "🔄 Getting location..."}
-                                </p>
-                                <p>
-                                    <strong>Current Time:</strong>{" "}
-                                    {new Date().toLocaleTimeString()}
-                                </p>
+                                {/* Current time removed per request */}
                                 <p>
                                     <strong>Scheduled Time:</strong>{" "}
                                     {sessionStartTimeData
@@ -956,28 +1071,36 @@ function App() {
                                         : "Loading..."}
                                 </p>
 
-                                {autoRecordCountdown > 0 && (
-                                    <div className="countdown">
-                                        <h4>
-                                            ⏰ Auto-Recording in:{" "}
-                                            {autoRecordCountdown}s
-                                        </h4>
+                                {autoRecordingCompleted ? (
+                                    <div className="session-completed">
+                                        <h4>✅ Session Completed</h4>
+                                        <p>The scheduled recording has finished. You can schedule a new session to record again.</p>
                                     </div>
-                                )}
+                                ) : (
+                                    <>
+                                        {autoRecordCountdown > 0 && (
+                                            <div className="countdown">
+                                                <h4>
+                                                    ⏰ Auto-Recording in: {autoRecordCountdown}s
+                                                </h4>
+                                            </div>
+                                        )}
 
-                                {autoRecordCountdown === 0 &&
-                                    sessionStartTimeData &&
-                                    !isAutoRecording && (
-                                        <div className="waiting-status">
-                                            <h4>
-                                                ⏳ Waiting for recording time...
-                                            </h4>
-                                            <p>
-                                                Countdown will start 30 seconds
-                                                before scheduled time
-                                            </p>
-                                        </div>
-                                    )}
+                                        {autoRecordCountdown === 0 &&
+                                            sessionStartTimeData &&
+                                            !isAutoRecording && (
+                                                <div className="waiting-status">
+                                                    <h4>
+                                                        ⏳ Waiting for recording time...
+                                                    </h4>
+                                                    <p>
+                                                        Countdown will start 30 seconds
+                                                        before scheduled time
+                                                    </p>
+                                                </div>
+                                            )}
+                                    </>
+                                )}
 
                                 {isAutoRecording && (
                                     <div className="auto-recording">
@@ -991,51 +1114,28 @@ function App() {
 
                             <div className="participants-list">
                                 <h4>👥 Participants</h4>
-                                {sessionParticipants.map(
-                                    (participant, index) => (
-                                        <div
-                                            key={index}
-                                            className={`participant ${
-                                                participant.isActive
-                                                    ? "active"
-                                                    : "inactive"
-                                            }`}
-                                        >
-                                            <span>{participant.username}</span>
-                                            <span className="device-name">
-                                                ({participant.deviceName})
-                                            </span>
+                                {sessionParticipants.map((participant, index) => (
+                                    <div
+                                        key={index}
+                                        className={`participant ${participant.isActive ? "active" : "inactive"}`}
+                                    >
+                                        <div className="participant-main">
+                                            <strong>{participant.username}</strong>
+                                            <span className="device-name">({participant.deviceName})</span>
                                         </div>
-                                    )
-                                )}
-                            </div>
-
-                            <div className="session-recordings">
-                                <h4>🎵 Session Recordings</h4>
-                                {sessionRecordings.map((recording, index) => (
-                                    <div key={index} className="recording-item">
-                                        <div className="recording-info">
-                                            <span className="recording-user">
-                                                {recording.username}
-                                            </span>
-                                            <span className="recording-device">
-                                                ({recording.deviceName})
-                                            </span>
-                                            <span className="recording-duration">
-                                                {recording.duration}s
-                                            </span>
-                                        </div>
-                                        <audio
-                                            controls
-                                            src={recording.audioUrl}
-                                            className="session-audio-player"
-                                        >
-                                            Your browser does not support the
-                                            audio element.
-                                        </audio>
+                                        {participant.location && (
+                                            <div className="participant-location">
+                                                <small>
+                                                    {participant.location.latitude.toFixed(6)}, {participant.location.longitude.toFixed(6)}
+                                                </small>
+                                                <small> • joined at {new Date(participant.joinedAt).toLocaleTimeString()}</small>
+                                            </div>
+                                        )}
                                     </div>
                                 ))}
                             </div>
+
+                            {/* Session recordings list removed per request */}
 
                             <button
                                 className="session-btn leave"
@@ -1047,74 +1147,7 @@ function App() {
                     )}
                 </div>
 
-                {/* Audio Recording Section */}
-                <div className="audio-section">
-                    <h3>🎤 Audio Recording</h3>
-
-                    {!isRecording && !audioBlob && (
-                        <button
-                            className="record-btn start"
-                            onClick={startRecording}
-                        >
-                            🎤 Start Recording
-                        </button>
-                    )}
-
-                    {isRecording && (
-                        <div className="recording-controls">
-                            <div className="recording-timer">
-                                <span className="timer-icon">⏱️</span>
-                                <span className="timer-text">
-                                    {formatTime(recordingTime)}
-                                </span>
-                            </div>
-                            <div className="recording-buttons">
-                                {!isPaused ? (
-                                    <button
-                                        className="record-btn pause"
-                                        onClick={pauseRecording}
-                                    >
-                                        ⏸️ Pause
-                                    </button>
-                                ) : (
-                                    <button
-                                        className="record-btn resume"
-                                        onClick={resumeRecording}
-                                    >
-                                        ▶️ Resume
-                                    </button>
-                                )}
-                                <button
-                                    className="record-btn stop"
-                                    onClick={stopRecording}
-                                >
-                                    ⏹️ Stop
-                                </button>
-                            </div>
-                        </div>
-                    )}
-
-                    {audioBlob && (
-                        <div className="audio-playback">
-                            <h4>🎵 Recorded Audio</h4>
-                            <audio
-                                controls
-                                src={audioUrl}
-                                className="audio-player"
-                            >
-                                Your browser does not support the audio element.
-                            </audio>
-                            <div className="audio-actions">
-                                <button
-                                    className="action-btn"
-                                    onClick={clearRecording}
-                                >
-                                    🗑️ Clear Recording
-                                </button>
-                            </div>
-                        </div>
-                    )}
-                </div>
+                {/* Audio recording UI removed; playback is now displayed with location before saving */}
 
                 {error && (
                     <div className="error-message">
@@ -1125,7 +1158,9 @@ function App() {
 
                 {location && (
                     <div className="location-info">
-                        <h3>✅ Location Found!</h3>
+                        {(location.latitude && location.longitude && location.accuracy && location.timestamp && audioBlob) ? (
+                            <h3>Data Collected:</h3>
+                        ) : null}
                         <div className="coordinates">
                             <div className="coordinate-item">
                                 <label>Latitude:</label>
@@ -1197,61 +1232,41 @@ function App() {
                             </button>
                         </div>
 
-                        <div className="save-section">
-                            <h3>💾 Save to Database</h3>
-                            <div className="device-info">
-                                <div className="form-group">
-                                    <label htmlFor="device-name">
-                                        Device Name:
-                                    </label>
-                                    <input
-                                        type="text"
-                                        id="device-name"
-                                        value={editableName}
-                                        onChange={(e) =>
-                                            setEditableName(e.target.value)
-                                        }
-                                        placeholder="Enter custom device name"
-                                        className="form-input"
-                                    />
+                        <>
+                            {audioBlob && (
+                                <div className="audio-playback">
+                                    <h4>🎵 Recorded Audio</h4>
+                                    <audio
+                                        controls
+                                        src={audioUrl}
+                                        className="audio-player"
+                                    >
+                                        Your browser does not support the audio element.
+                                    </audio>
+                                    <div className="audio-actions">
+                                        <button
+                                            className="action-btn"
+                                            onClick={clearRecording}
+                                        >
+                                            🗑️ Clear Recording
+                                        </button>
+                                    </div>
                                 </div>
-                                <div className="form-group">
-                                    <label htmlFor="username">Username:</label>
-                                    <input
-                                        type="text"
-                                        id="username"
-                                        value={username}
-                                        onChange={(e) =>
-                                            setUsername(e.target.value)
-                                        }
-                                        placeholder="Enter your username"
-                                        className="form-input"
-                                    />
-                                </div>
-                            </div>
+                            )}
+
                             <button
                                 className="save-btn"
                                 onClick={saveToDatabase}
                                 disabled={saving}
                             >
-                                {saving
-                                    ? "Saving..."
-                                    : audioBlob
-                                    ? "💾 Save Location & Audio"
-                                    : "💾 Save/Update Location"}
+                                {saving ? "Saving..." : audioBlob ? "💾 Save Location & Audio" : "💾 Save/Update Location"}
                             </button>
                             {saveMessage && (
-                                <div
-                                    className={`save-message ${
-                                        saveMessage.includes("✅")
-                                            ? "success"
-                                            : "error"
-                                    }`}
-                                >
+                                <div className={`save-message ${saveMessage.includes("✅") ? "success" : "error"}`}>
                                     {saveMessage}
                                 </div>
                             )}
-                        </div>
+                        </>
                     </div>
                 )}
             </main>
