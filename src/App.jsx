@@ -98,7 +98,7 @@ function App() {
             ? userName.trim().replace(/[^a-zA-Z0-9]/g, "_")
             : "anonymous";
 
-        return `${cleanSessionName}_${cleanUserName}_${date}_${time}.wav`;
+        return `${cleanSessionName}_${cleanUserName}_${date}_${time}.webm`;
     };
 
     // Request location and microphone permissions and return location info
