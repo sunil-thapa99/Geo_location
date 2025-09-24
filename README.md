@@ -1,6 +1,9 @@
 # Geolocation App with Database
 
 A React application that gets your current location and allows you to save coordinates to a database with name and ID.
+##Branches
+-main
+-win-dev
 
 ## Features
 
