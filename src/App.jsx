@@ -98,7 +98,80 @@ function App() {
             ? userName.trim().replace(/[^a-zA-Z0-9]/g, "_")
             : "anonymous";
 
-        return `${cleanSessionName}_${cleanUserName}_${date}_${time}.webm`;
+        return `${cleanSessionName}_${cleanUserName}_${date}_${time}.wav`;
+    };
+
+    // Convert an audio Blob (typically webm/ogg from MediaRecorder) to a WAV Blob (PCM 16-bit)
+    const convertBlobToWav = async (inputBlob) => {
+        try {
+            const arrayBuffer = await inputBlob.arrayBuffer();
+            const AudioContext = window.AudioContext || window.webkitAudioContext;
+            const audioCtx = new AudioContext();
+            const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+            const numChannels = audioBuffer.numberOfChannels;
+            const sampleRate = audioBuffer.sampleRate;
+            const format = 1; // PCM
+            const bitsPerSample = 16;
+
+            // interleave channels
+            const samples = audioBuffer.length;
+            const blockAlign = numChannels * bitsPerSample / 8;
+            const byteRate = sampleRate * blockAlign;
+            const dataSize = samples * blockAlign;
+            const buffer = new ArrayBuffer(44 + dataSize);
+            const view = new DataView(buffer);
+
+            // write WAV header
+            let offset = 0;
+            const writeString = (s) => {
+                for (let i = 0; i < s.length; i++) {
+                    view.setUint8(offset++, s.charCodeAt(i));
+                }
+            };
+
+            writeString('RIFF'); // ChunkID
+            view.setUint32(offset, 36 + dataSize, true); offset += 4; // ChunkSize
+            writeString('WAVE'); // Format
+            writeString('fmt '); // Subchunk1ID
+            view.setUint32(offset, 16, true); offset += 4; // Subchunk1Size
+            view.setUint16(offset, format, true); offset += 2; // AudioFormat (1 = PCM)
+            view.setUint16(offset, numChannels, true); offset += 2; // NumChannels
+            view.setUint32(offset, sampleRate, true); offset += 4; // SampleRate
+            view.setUint32(offset, byteRate, true); offset += 4; // ByteRate
+            view.setUint16(offset, blockAlign, true); offset += 2; // BlockAlign
+            view.setUint16(offset, bitsPerSample, true); offset += 2; // BitsPerSample
+            writeString('data'); // Subchunk2ID
+            view.setUint32(offset, dataSize, true); offset += 4; // Subchunk2Size
+
+            // write interleaved PCM samples
+            const channelData = [];
+            for (let ch = 0; ch < numChannels; ch++) {
+                channelData.push(audioBuffer.getChannelData(ch));
+            }
+
+            // helper to clamp and write sample
+            for (let i = 0; i < samples; i++) {
+                for (let ch = 0; ch < numChannels; ch++) {
+                    let sample = channelData[ch][i];
+                    // clamp
+                    sample = Math.max(-1, Math.min(1, sample));
+                    // convert to 16-bit PCM
+                    const intSample = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+                    view.setInt16(offset, intSample, true);
+                    offset += 2;
+                }
+            }
+
+            // create Blob
+            const wavBlob = new Blob([view], { type: 'audio/wav' });
+            // close audio context
+            try { audioCtx.close(); } catch (e) {}
+            return wavBlob;
+        } catch (err) {
+            console.warn('WAV conversion failed, returning original blob', err);
+            return inputBlob;
+        }
     };
 
     // Request location and microphone permissions and return location info
@@ -337,11 +410,16 @@ function App() {
                 }
             };
 
-            recorder.onstop = () => {
+            recorder.onstop = async () => {
                 console.log("MediaRecorder stopped, creating blob");
-                const blob = new Blob(chunks, { type: "audio/wav" });
-                setAudioBlob(blob);
-                const url = URL.createObjectURL(blob);
+                // recorded blob (browser-provided mime), leave type unspecified
+                const recordedBlob = new Blob(chunks);
+
+                // try convert to WAV (lossless PCM); if conversion fails, fall back to recorded blob
+                const wavBlob = await convertBlobToWav(recordedBlob);
+
+                setAudioBlob(wavBlob);
+                const url = URL.createObjectURL(wavBlob);
                 setAudioUrl(url);
                 setAudioChunks(chunks);
                 stream.getTracks().forEach((track) => track.stop());
