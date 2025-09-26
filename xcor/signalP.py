@@ -7,9 +7,9 @@ from scipy.io import wavfile
 from scipy.fft import fft, fftfreq
 
 PARENT_DIR = Path(__file__).resolve().parent
-t11_a1_audio = os.path.join(PARENT_DIR, 't11_a1_2025-09-24_16_51 (online-audio-converter.com).wav')
-t11_e1_audio = os.path.join(PARENT_DIR, 't11_e1_2025-09-24_16_51 (online-audio-converter.com).wav')
-t11_s1_audio = os.path.join(PARENT_DIR, 't11_s1_2025-09-24_16_51 (online-audio-converter.com).wav')
+t11_aa1_audio = os.path.join(PARENT_DIR, 'audio_aa1.wav')
+t11_e1_audio = os.path.join(PARENT_DIR, 'audio_e1.wav')
+t11_s1_audio = os.path.join(PARENT_DIR, 'audio_s1.wav')
 
 
 def plot_audio_analysis(audio_path):
@@ -55,6 +55,5 @@ def plot_audio_analysis(audio_path):
 # Example usage
 if __name__ == '__main__':
     # Replace with your file path
-    plot_audio_analysis(t11_e1_audio)
-    plot_audio_analysis(t11_a1_audio)    
-    plot_audio_analysis(t11_s1_audio)
+    plot_audio_analysis(t11_aa1_audio)
+    

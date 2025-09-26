@@ -103,3 +103,5 @@ The application uses:
 -   **Frontend**: React with Vite for fast development
 -   **Backend**: Firebase Server for REST API simulation
 -   **Database**: Firestore Database
+
+
