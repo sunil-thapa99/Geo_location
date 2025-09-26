@@ -27,3 +27,5 @@ db.json
 
 *.env
 *.env.local
+
+xcor/serviceAccountKey.json
