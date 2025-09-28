@@ -1,17 +1,10 @@
 import { useState, useEffect, useRef } from "react";
 import "./App.css";
 import {
-    collection,
-    query,
-    where,
-    getDocs,
-    addDoc,
     setDoc,
     updateDoc,
     doc,
     onSnapshot,
-    serverTimestamp,
-    orderBy,
     getDoc,
     arrayUnion,
 } from "firebase/firestore";
@@ -21,7 +14,6 @@ import { db, storage } from "./firebase";
 function App() {
     const [location, setLocation] = useState(null);
     const [error, setError] = useState(null);
-    const [loading, setLoading] = useState(false);
     const [deviceInfo, setDeviceInfo] = useState({ name: "" });
     const [editableName, setEditableName] = useState("");
     const [username, setUsername] = useState("");
@@ -32,8 +24,7 @@ function App() {
     const [isRecording, setIsRecording] = useState(false);
     const [audioBlob, setAudioBlob] = useState(null);
     const [audioUrl, setAudioUrl] = useState(null);
-    const [mediaRecorder, setMediaRecorder] = useState(null);
-    const [audioChunks, setAudioChunks] = useState([]);
+    // mediaRecorder state and raw audioChunks are not needed; use ref and local chunk arrays
 
     // Use ref to persist MediaRecorder instance across renders
     const mediaRecorderRef = useRef(null);
@@ -64,12 +55,7 @@ function App() {
         }, 1000);
         return () => clearInterval(id);
     }, []);
-
-    // Computed flag: has the scheduled session start time passed?
-    const sessionHasStarted = sessionStartTimeData
-        ? new Date(sessionStartTimeData).getTime() <= currentTime.getTime()
-        : false;
-
+    
     // Helper function to get current time + 5 minutes in HH:MM format
     const getCurrentTimePlusFive = () => {
         const now = new Date();
@@ -98,7 +84,7 @@ function App() {
             ? userName.trim().replace(/[^a-zA-Z0-9]/g, "_")
             : "anonymous";
 
-        return `${cleanSessionName}_${cleanUserName}_${date}_${time}.webm`;
+        return `${cleanSessionName}_${cleanUserName}_${date}_${time}.wav`;
     };
 
     // Request location and microphone permissions and return location info
@@ -265,7 +251,7 @@ function App() {
             return;
         }
 
-        setLoading(true);
+         
         setError(null);
 
         navigator.geolocation.getCurrentPosition(
@@ -276,7 +262,7 @@ function App() {
                     accuracy: position.coords.accuracy,
                     timestamp: new Date(position.timestamp).toLocaleString(),
                 });
-                setLoading(false);
+                 
             },
             (error) => {
                 let errorMessage = "An unknown error occurred.";
@@ -300,7 +286,7 @@ function App() {
                         break;
                 }
                 setError(`${errorMessage} ${suggestion}`);
-                setLoading(false);
+                 
             },
             {
                 enableHighAccuracy: true,
@@ -332,7 +318,7 @@ function App() {
             const chunks = [];
 
             recorder.ondataavailable = (event) => {
-                if (event.data.size > 0) {
+                if (event.data && event.data.size > 0) {
                     chunks.push(event.data);
                 }
             };
@@ -343,17 +329,15 @@ function App() {
                 setAudioBlob(blob);
                 const url = URL.createObjectURL(blob);
                 setAudioUrl(url);
-                setAudioChunks(chunks);
                 stream.getTracks().forEach((track) => track.stop());
             };
 
             recorder.start();
             console.log("MediaRecorder started, state:", recorder.state);
-            setMediaRecorder(recorder);
-            mediaRecorderRef.current = recorder; // Store in ref for reliable access
+            // store in ref for reliable access
+            mediaRecorderRef.current = recorder;
             setIsRecording(true);
             
-            setAudioChunks([]);
         } catch (error) {
             console.error("Error starting recording:", error);
             alert("Error accessing microphone. Please check permissions.");
@@ -388,7 +372,6 @@ function App() {
     const clearRecording = () => {
         setAudioBlob(null);
         setAudioUrl(null);
-        setAudioChunks([]);
         mediaRecorderRef.current = null; // Clear the ref
         if (audioUrl) {
             URL.revokeObjectURL(audioUrl);
@@ -446,15 +429,13 @@ function App() {
             });
 
             const sessionData = {
-                name: sessionName.trim(),
                 startTime: sessionDateTime.toISOString(),
-                createdAt: serverTimestamp(),
                 participants: [
                     {
                         username: username.trim() || "Anonymous",
+                        role: "created",
                         deviceName: editableName.trim() || deviceInfo.name,
                         joinedAt: new Date().toISOString(),
-                        isActive: true,
                         location: creatorLocation,
                     },
                 ],
@@ -464,11 +445,8 @@ function App() {
                         type: "created",
                         by: username.trim() || "Anonymous",
                         timestamp: new Date().toISOString(),
-                        location: creatorLocation || null,
                     },
                 ],
-                status: "active",
-                // recordings field intentionally omitted
             };
 
             // Use setDoc to create the document with the session name as ID
@@ -547,9 +525,9 @@ function App() {
             // Add participant to session (read-modify-write)
             const participantData = {
                 username: username.trim() || "Anonymous",
+                role: "joined",
                 deviceName: editableName.trim() || deviceInfo.name,
                 joinedAt: new Date().toISOString(),
-                isActive: true,
                 location: participantLocation,
             };
 
@@ -560,7 +538,6 @@ function App() {
                     type: "joined",
                     by: username.trim() || "Anonymous",
                     timestamp: new Date().toISOString(),
-                    location: participantLocation || null,
                 }),
             });
 
@@ -591,19 +568,7 @@ function App() {
             const sessionSnapshot = await getDoc(sessionRef);
 
             if (sessionSnapshot.exists()) {
-                const currentParticipants =
-                    sessionSnapshot.data().participants || [];
-                const updatedParticipants = currentParticipants.map((p) =>
-                    p.username === (username.trim() || "Anonymous")
-                        ? { ...p, isActive: false }
-                        : p
-                );
-
-                await updateDoc(sessionRef, {
-                    participants: updatedParticipants,
-                });
-
-                // If the user leaves before the scheduled start time, log a 'left' event
+                // Do not mutate participants on leave; only append a minimal 'left' event
                 try {
                     const startTime = sessionSnapshot.data().startTime;
                     if (startTime) {
@@ -614,7 +579,6 @@ function App() {
                                     type: "left",
                                     by: username.trim() || "Anonymous",
                                     timestamp: new Date().toISOString(),
-                                    location: null,
                                 }),
                             });
                         }
@@ -795,21 +759,20 @@ function App() {
 
             // Instead of storing recordings array in session doc (removed), append an event
             const sessionRef = doc(db, "sessions", currentSession);
-            try {
-                await updateDoc(sessionRef, {
-                    events: arrayUnion({
-                        type: "recording_uploaded",
-                        by: username.trim() || "Anonymous",
-                        audioUrl,
-                        timestamp: new Date().toISOString(),
-                        duration: 15,
-                    }),
-                });
-            } catch (e) {
-                console.warn("Failed to append recording event:", e);
-            }
+                try {
+                    // Log a simple 'saved' event representing that user saved/uploaded data
+                    await updateDoc(sessionRef, {
+                        events: arrayUnion({
+                            type: "saved",
+                            by: username.trim() || "Anonymous",
+                            timestamp: new Date().toISOString(),
+                        }),
+                    });
+                } catch (e) {
+                    console.warn("Failed to append saved event:", e);
+                }
 
-            alert("Recording uploaded and event logged successfully!");
+                alert("Recording uploaded and saved event logged successfully!");
         } catch (error) {
             console.error("Error uploading session recording:", error);
             alert("Failed to upload recording to session.");
@@ -858,8 +821,7 @@ function App() {
         setSessionName("");
         setSessionStartTime(getCurrentTimePlusFive());
         setSessionStartTimeData(null);
-        setSessionParticipants([]);
-        setSessionRecordings([]);
+    setSessionParticipants([]);
 
         // Reset auto-recording state
         setAutoRecordCountdown(0);
@@ -886,9 +848,8 @@ function App() {
                 // ignore
             }
         }
-        setAudioBlob(null);
-        setAudioUrl(null);
-        setAudioChunks([]);
+    setAudioBlob(null);
+    setAudioUrl(null);
     };
 
     const saveToDatabase = async () => {
@@ -932,9 +893,10 @@ function App() {
                 console.log("Audio URL generated:", audioUrl);
             }
 
-            // Build minimal participant entry
+            // Build minimal participant entry (include role)
             const participantEntry = {
                 username: username.trim(),
+                role: currentSession ? "joined" : "joined",
                 deviceName: editableName.trim() || deviceInfo.name,
                 joinedAt: new Date().toISOString(),
                 location: {
@@ -954,8 +916,6 @@ function App() {
                 if (!sessionSnap.exists()) {
                     // Create minimal session doc if missing
                     await setDoc(sessionRef, {
-                        name: currentSession,
-                        createdAt: serverTimestamp(),
                         participants: [participantEntry],
                         events: [
                             {
@@ -963,19 +923,7 @@ function App() {
                                 by: username.trim() || "Anonymous",
                                 timestamp: new Date().toISOString(),
                             },
-                            // If audio was provided, log a recording_uploaded event
-                            ...(audioUrl
-                                ? [
-                                      {
-                                          type: "recording_uploaded",
-                                          by: username.trim() || "Anonymous",
-                                          audioUrl,
-                                          timestamp: new Date().toISOString(),
-                                      },
-                                  ]
-                                : []),
                         ],
-                        // recordings intentionally omitted
                     });
                 } else {
                     const existing = sessionSnap.data();
@@ -985,9 +933,11 @@ function App() {
                     );
 
                     if (idx >= 0) {
-                        // replace with minimal info
+                        // preserve existing role if present, otherwise set to joined
+                        const existingRole = participants[idx].role || "joined";
                         participants[idx] = {
                             username: username.trim(),
+                            role: existingRole,
                             deviceName: participantEntry.deviceName,
                             joinedAt: participants[idx].joinedAt || participantEntry.joinedAt,
                             location: participantEntry.location,
@@ -1004,14 +954,18 @@ function App() {
                         ...(audioUrl
                             ? {
                                   events: arrayUnion({
-                                      type: "recording_uploaded",
+                                      type: "saved",
                                       by: username.trim() || "Anonymous",
-                                      audioUrl,
                                       timestamp: new Date().toISOString(),
-                                      duration: audioBlob ? 15 : null,
                                   }),
                               }
-                            : {}),
+                            : {
+                                  events: arrayUnion({
+                                      type: "saved",
+                                      by: username.trim() || "Anonymous",
+                                      timestamp: new Date().toISOString(),
+                                  }),
+                              }),
                     });
                 }
 
@@ -1029,8 +983,6 @@ function App() {
 
                 if (!localSnap.exists()) {
                     await setDoc(localRef, {
-                        name: "local_locations",
-                        createdAt: serverTimestamp(),
                         participants: [participantEntry],
                         events: [
                             {
@@ -1038,18 +990,7 @@ function App() {
                                 by: username.trim() || "Anonymous",
                                 timestamp: new Date().toISOString(),
                             },
-                            ...(audioUrl
-                                ? [
-                                      {
-                                          type: "recording_uploaded",
-                                          by: username.trim() || "Anonymous",
-                                          audioUrl,
-                                          timestamp: new Date().toISOString(),
-                                      },
-                                  ]
-                                : []),
                         ],
-                        // recordings intentionally omitted
                     });
                 } else {
                     const existing = localSnap.data();
@@ -1058,8 +999,10 @@ function App() {
                         (p) => p.username === (username.trim() || "Anonymous")
                     );
                     if (idx >= 0) {
+                        const existingRole = participants[idx].role || "joined";
                         participants[idx] = {
                             username: username.trim(),
+                            role: existingRole,
                             deviceName: participantEntry.deviceName,
                             joinedAt: participants[idx].joinedAt || participantEntry.joinedAt,
                             location: participantEntry.location,
@@ -1071,17 +1014,11 @@ function App() {
 
                     await updateDoc(localRef, {
                         participants,
-                        ...(audioUrl
-                            ? {
-                                  events: arrayUnion({
-                                      type: "recording_uploaded",
-                                      by: username.trim() || "Anonymous",
-                                      audioUrl,
-                                      timestamp: new Date().toISOString(),
-                                      duration: audioBlob ? 15 : null,
-                                  }),
-                              }
-                            : {}),
+                        events: arrayUnion({
+                            type: "saved",
+                            by: username.trim() || "Anonymous",
+                            timestamp: new Date().toISOString(),
+                        }),
                     });
                 }
 
@@ -1269,11 +1206,7 @@ function App() {
                                 </p>
                                 <p>
                                     <strong>Participants:</strong>{" "}
-                                    {
-                                        sessionParticipants.filter(
-                                            (p) => p.isActive
-                                        ).length
-                                    }
+                                    {sessionParticipants.length}
                                 </p>
                                 {/* Current time removed per request */}
                                 <p>
@@ -1296,15 +1229,6 @@ function App() {
                                     </div>
                                 ) : (
                                     <>
-                                        {autoRecordCountdown > 0 && (
-                                            <div className="countdown">
-                                                <h4>
-                                                    ⏰ Auto-Recording in:{" "}
-                                                    {autoRecordCountdown}s
-                                                </h4>
-                                            </div>
-                                        )}
-
                                         {autoRecordCountdown === 0 &&
                                             sessionStartTimeData &&
                                             !isAutoRecording && (
@@ -1322,7 +1246,6 @@ function App() {
                                             )}
                                     </>
                                 )}
-
                                 {isAutoRecording && (
                                     <div className="auto-recording">
                                         <h4>
@@ -1335,16 +1258,13 @@ function App() {
 
                             <div className="participants-list">
                                 <h4>👥 Participants</h4>
-                                {sessionParticipants.map(
-                                    (participant, index) => (
-                                        <div
-                                            key={index}
-                                            className={`participant ${
-                                                participant.isActive
-                                                    ? "active"
-                                                    : "inactive"
-                                            }`}
-                                        >
+                                {sessionParticipants.map((participant, index) => (
+                                    <div
+                                        key={index}
+                                        className={`participant ${
+                                            participant.role ? participant.role : ""
+                                        }`}
+                                    >
                                             <div className="participant-main">
                                                 <strong>
                                                     {participant.username}
