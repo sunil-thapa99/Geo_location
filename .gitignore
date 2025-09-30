@@ -29,3 +29,4 @@ db.json
 *.env.local
 
 xcor/serviceAccountKey.json
+venv/*

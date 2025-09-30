@@ -1229,6 +1229,14 @@ function App() {
                                     </div>
                                 ) : (
                                     <>
+                                        {autoRecordCountdown > 0 && (
+                                                <div className="countdown">
+                                                    <h4>
+                                                        ⏰ Auto-Recording in:{" "}
+                                                        {autoRecordCountdown}s
+                                                    </h4>
+                                                </div>
+                                            )}
                                         {autoRecordCountdown === 0 &&
                                             sessionStartTimeData &&
                                             !isAutoRecording && (
