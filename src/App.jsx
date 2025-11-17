@@ -352,7 +352,7 @@ function App() {
             setMediaRecorder(recorder);
             mediaRecorderRef.current = recorder; // Store in ref for reliable access
             setIsRecording(true);
-            
+
             setAudioChunks([]);
         } catch (error) {
             console.error("Error starting recording:", error);
@@ -382,8 +382,6 @@ function App() {
             );
         }
     };
-
-
 
     const clearRecording = () => {
         setAudioBlob(null);
@@ -989,7 +987,9 @@ function App() {
                         participants[idx] = {
                             username: username.trim(),
                             deviceName: participantEntry.deviceName,
-                            joinedAt: participants[idx].joinedAt || participantEntry.joinedAt,
+                            joinedAt:
+                                participants[idx].joinedAt ||
+                                participantEntry.joinedAt,
                             location: participantEntry.location,
                             audioUrl: participantEntry.audioUrl,
                         };
@@ -1015,7 +1015,9 @@ function App() {
                     });
                 }
 
-                setSaveMessage("✅ Location and audio saved into session successfully!");
+                setSaveMessage(
+                    "✅ Location and audio saved into session successfully!"
+                );
                 // After a brief pause so the user sees the confirmation, reset UI back to create/join
                 setTimeout(() => {
                     resetAfterSave();
@@ -1061,7 +1063,9 @@ function App() {
                         participants[idx] = {
                             username: username.trim(),
                             deviceName: participantEntry.deviceName,
-                            joinedAt: participants[idx].joinedAt || participantEntry.joinedAt,
+                            joinedAt:
+                                participants[idx].joinedAt ||
+                                participantEntry.joinedAt,
                             location: participantEntry.location,
                             audioUrl: participantEntry.audioUrl,
                         };
@@ -1085,7 +1089,9 @@ function App() {
                     });
                 }
 
-                setSaveMessage("✅ Location and audio saved into local session successfully!");
+                setSaveMessage(
+                    "✅ Location and audio saved into local session successfully!"
+                );
                 // After a brief pause so the user sees the confirmation, reset UI back to create/join
                 setTimeout(() => {
                     resetAfterSave();
