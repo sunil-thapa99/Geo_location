@@ -38,6 +38,12 @@ function App() {
     // Use ref to persist MediaRecorder instance across renders
     const mediaRecorderRef = useRef(null);
 
+    // Use refs to track recording state for onSnapshot callbacks (avoid stale closures)
+    const isAutoRecordingRef = useRef(false);
+    const autoRecordCountdownRef = useRef(0);
+    const autoRecordingCompletedRef = useRef(false);
+    const autoRecordingTriggeredRef = useRef(false);
+
     // Session states
     const [currentSession, setCurrentSession] = useState(null);
     const [sessionId, setSessionId] = useState("");
@@ -57,6 +63,23 @@ function App() {
 
     // Clock state to show current time on the right side
     const [currentTime, setCurrentTime] = useState(new Date());
+
+    // Sync refs with state to avoid stale closures in onSnapshot callbacks
+    useEffect(() => {
+        isAutoRecordingRef.current = isAutoRecording;
+    }, [isAutoRecording]);
+
+    useEffect(() => {
+        autoRecordCountdownRef.current = autoRecordCountdown;
+    }, [autoRecordCountdown]);
+
+    useEffect(() => {
+        autoRecordingCompletedRef.current = autoRecordingCompleted;
+    }, [autoRecordingCompleted]);
+
+    useEffect(() => {
+        autoRecordingTriggeredRef.current = autoRecordingTriggered;
+    }, [autoRecordingTriggered]);
 
     useEffect(() => {
         const id = setInterval(() => {
@@ -631,6 +654,12 @@ function App() {
             setAutoRecordingTriggered(false);
             setAutoRecordingCompleted(false); // Reset auto-recording completion flag
 
+            // Reset refs to match state
+            isAutoRecordingRef.current = false;
+            autoRecordCountdownRef.current = 0;
+            autoRecordingCompletedRef.current = false;
+            autoRecordingTriggeredRef.current = false;
+
             // Clear any existing countdown interval
             if (countdownIntervalId) {
                 clearInterval(countdownIntervalId);
@@ -661,10 +690,11 @@ function App() {
                 setSessionStartTimeData(sessionData.startTime);
 
                 // Check if it's time to start auto-recording (only if not already recording or counting down)
+                // Use refs to avoid stale closure values when session document is updated
                 if (
-                    !isAutoRecording &&
-                    autoRecordCountdown === 0 &&
-                    !autoRecordingCompleted
+                    !isAutoRecordingRef.current &&
+                    autoRecordCountdownRef.current === 0 &&
+                    !autoRecordingCompletedRef.current
                 ) {
                     checkAutoRecordTime(sessionData.startTime);
                 }
@@ -675,7 +705,8 @@ function App() {
     };
 
     const checkAutoRecordTime = (startTime) => {
-        if (!startTime || autoRecordingCompleted) return;
+        // Use ref to check current state (avoid stale closure)
+        if (!startTime || autoRecordingCompletedRef.current) return;
 
         const now = new Date();
         const scheduledTime = new Date(startTime);
@@ -686,21 +717,27 @@ function App() {
             scheduled: scheduledTime.toLocaleTimeString(),
             timeDiff: timeDiff,
             timeDiffSeconds: Math.ceil(timeDiff / 1000),
-            autoRecordingCompleted: autoRecordingCompleted,
+            autoRecordingCompleted: autoRecordingCompletedRef.current,
         });
 
         if (timeDiff > 0 && timeDiff <= 30000) {
             // Within 30 seconds - only start countdown if not already running
             if (!countdownIntervalId) {
-                setAutoRecordCountdown(Math.ceil(timeDiff / 1000));
+                const countdownValue = Math.ceil(timeDiff / 1000);
+                setAutoRecordCountdown(countdownValue);
+                // Update ref immediately to prevent race conditions
+                autoRecordCountdownRef.current = countdownValue;
 
                 // Start countdown
                 const intervalId = setInterval(() => {
                     setAutoRecordCountdown((prev) => {
+                        const newValue = prev <= 1 ? 0 : prev - 1;
+                        // Update ref immediately
+                        autoRecordCountdownRef.current = newValue;
                         if (prev <= 1) {
                             clearInterval(intervalId);
                             setCountdownIntervalId(null);
-                            if (!autoRecordingTriggered) {
+                            if (!autoRecordingTriggeredRef.current) {
                                 setAutoRecordingTriggered(true);
                                 startAutoRecording();
                             }
@@ -722,7 +759,8 @@ function App() {
                 clearInterval(countdownIntervalId);
                 setCountdownIntervalId(null);
             }
-            if (!autoRecordingTriggered) {
+            // Use ref to check current state (avoid stale closure)
+            if (!autoRecordingTriggeredRef.current) {
                 setAutoRecordingTriggered(true);
                 startAutoRecording();
             }
@@ -733,15 +771,21 @@ function App() {
                 setCountdownIntervalId(null);
             }
             setAutoRecordCountdown(0);
+            // Update ref immediately
+            autoRecordCountdownRef.current = 0;
         }
     };
 
     const startAutoRecording = async () => {
-        if (isAutoRecording || autoRecordingTriggered) return;
+        // Use refs to check current state (avoid stale closure)
+        if (isAutoRecordingRef.current || autoRecordingTriggeredRef.current) return;
 
         setAutoRecordingTriggered(true);
         setIsAutoRecording(true);
         setAutoRecordingTime(15);
+        // Update refs immediately to prevent race conditions
+        autoRecordingTriggeredRef.current = true;
+        isAutoRecordingRef.current = true;
         await startRecording();
 
         // Start countdown timer for auto-recording (only if not already running)
@@ -762,6 +806,10 @@ function App() {
                         setAutoRecordingTime(0);
                         setAutoRecordingTriggered(false);
                         setAutoRecordingCompleted(true); // Mark auto-recording as completed
+                        // Update ref immediately to prevent race conditions
+                        autoRecordingCompletedRef.current = true;
+                        autoRecordingTriggeredRef.current = false;
+                        isAutoRecordingRef.current = false;
 
                         // Upload the recording to session after a short delay to ensure recording is processed
                         setTimeout(() => {
@@ -857,7 +905,6 @@ function App() {
         setSessionStartTime(getCurrentTimePlusFive());
         setSessionStartTimeData(null);
         setSessionParticipants([]);
-        setSessionRecordings([]);
 
         // Reset auto-recording state
         setAutoRecordCountdown(0);
@@ -865,6 +912,12 @@ function App() {
         setAutoRecordingTime(0);
         setAutoRecordingTriggered(false);
         setAutoRecordingCompleted(false);
+
+        // Reset refs to match state
+        isAutoRecordingRef.current = false;
+        autoRecordCountdownRef.current = 0;
+        autoRecordingCompletedRef.current = false;
+        autoRecordingTriggeredRef.current = false;
 
         // Stop and clear any intervals
         if (countdownIntervalId) {
