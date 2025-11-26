@@ -689,6 +689,13 @@ function App() {
                 // recordings were removed from session documents
                 setSessionStartTimeData(sessionData.startTime);
 
+                // If the session document indicates completion, stop listening for time checks.
+                if (sessionData.status === "completed") {
+                    setAutoRecordingCompleted(true);
+                    autoRecordingCompletedRef.current = true;
+                    return; // Do not proceed to check time
+                }
+
                 // Check if it's time to start auto-recording (only if not already recording or counting down)
                 // Use refs to avoid stale closure values when session document is updated
                 if (
@@ -810,6 +817,18 @@ function App() {
                         autoRecordingCompletedRef.current = true;
                         autoRecordingTriggeredRef.current = false;
                         isAutoRecordingRef.current = false;
+
+                        // Mark the session as completed in Firestore
+                        try {
+                            const sessionRef = doc(
+                                db,
+                                "sessions",
+                                currentSession
+                            );
+                            updateDoc(sessionRef, { status: "completed" });
+                        } catch (e) {
+                            console.warn("Failed to update session status:", e);
+                        }
 
                         // Upload the recording to session after a short delay to ensure recording is processed
                         setTimeout(() => {
