@@ -485,7 +485,6 @@ function App() {
                         type: "created",
                         by: username.trim() || "Anonymous",
                         timestamp: new Date().toISOString(),
-                        location: creatorLocation || null,
                     },
                 ],
                 status: "active",
@@ -581,7 +580,6 @@ function App() {
                     type: "joined",
                     by: username.trim() || "Anonymous",
                     timestamp: new Date().toISOString(),
-                    location: participantLocation || null,
                 }),
             });
 
@@ -635,7 +633,6 @@ function App() {
                                     type: "left",
                                     by: username.trim() || "Anonymous",
                                     timestamp: new Date().toISOString(),
-                                    location: null,
                                 }),
                             });
                         }
@@ -865,9 +862,7 @@ function App() {
                     events: arrayUnion({
                         type: "recording_uploaded",
                         by: username.trim() || "Anonymous",
-                        audioUrl,
                         timestamp: new Date().toISOString(),
-                        duration: 15,
                     }),
                 });
             } catch (e) {
@@ -967,6 +962,11 @@ function App() {
             return;
         }
 
+        if (!currentSession) {
+            setSaveMessage("You must be in an active session to save data.");
+            return;
+        }
+
         if (!username.trim()) {
             setSaveMessage("Please enter a username!");
             return;
@@ -1016,160 +1016,81 @@ function App() {
                 audioUrl: audioUrl || null,
             };
 
-            if (currentSession) {
-                // Merge into the current session document
-                const sessionRef = doc(db, "sessions", currentSession);
-                const sessionSnap = await getDoc(sessionRef);
+            // Merge into the current session document
+            const sessionRef = doc(db, "sessions", currentSession);
+            const sessionSnap = await getDoc(sessionRef);
 
-                if (!sessionSnap.exists()) {
-                    // Create minimal session doc if missing
-                    await setDoc(sessionRef, {
-                        name: currentSession,
-                        createdAt: serverTimestamp(),
-                        participants: [participantEntry],
-                        events: [
-                            {
-                                type: "saved",
-                                by: username.trim() || "Anonymous",
-                                timestamp: new Date().toISOString(),
-                            },
-                            // If audio was provided, log a recording_uploaded event
-                            ...(audioUrl
-                                ? [
-                                      {
-                                          type: "recording_uploaded",
-                                          by: username.trim() || "Anonymous",
-                                          audioUrl,
-                                          timestamp: new Date().toISOString(),
-                                      },
-                                  ]
-                                : []),
-                        ],
-                        // recordings intentionally omitted
-                    });
-                } else {
-                    const existing = sessionSnap.data();
-                    const participants = existing.participants || [];
-                    const idx = participants.findIndex(
-                        (p) => p.username === (username.trim() || "Anonymous")
-                    );
-
-                    if (idx >= 0) {
-                        // replace with minimal info
-                        participants[idx] = {
-                            username: username.trim(),
-                            deviceName: participantEntry.deviceName,
-                            joinedAt:
-                                participants[idx].joinedAt ||
-                                participantEntry.joinedAt,
-                            location: participantEntry.location,
-                            audioUrl: participantEntry.audioUrl,
-                        };
-                    } else {
-                        participants.push(participantEntry);
-                    }
-
-                    // update participants array and append recording (if any)
-                    // Update participants; if audioUrl exists, append a recording_uploaded event
-                    await updateDoc(sessionRef, {
-                        participants,
+            if (!sessionSnap.exists()) {
+                // Create minimal session doc if missing
+                await setDoc(sessionRef, {
+                    name: currentSession,
+                    createdAt: serverTimestamp(),
+                    participants: [participantEntry],
+                    events: [
+                        {
+                            type: "saved",
+                            by: username.trim() || "Anonymous",
+                            timestamp: new Date().toISOString(),
+                        },
+                        // If audio was provided, log a recording_uploaded event
                         ...(audioUrl
-                            ? {
-                                  events: arrayUnion({
-                                      type: "recording_uploaded",
-                                      by: username.trim() || "Anonymous",
-                                      audioUrl,
-                                      timestamp: new Date().toISOString(),
-                                      duration: audioBlob ? 15 : null,
-                                  }),
-                              }
-                            : {}),
-                    });
-                }
-
-                setSaveMessage(
-                    "✅ Location and audio saved into session successfully!"
-                );
-                // After a brief pause so the user sees the confirmation, reset UI back to create/join
-                setTimeout(() => {
-                    resetAfterSave();
-                    setSaveMessage("");
-                }, 1500);
+                            ? [
+                                    {
+                                        type: "recording_uploaded",
+                                        by: username.trim() || "Anonymous",
+                                        timestamp: new Date().toISOString(),
+                                    },
+                                ]
+                            : []),
+                    ],
+                    // recordings intentionally omitted
+                });
             } else {
-                // No current session: store in a local sessions doc to avoid separate 'locations' collection
-                const localId = `local_${username.trim() || "anonymous"}`;
-                const localRef = doc(db, "sessions", localId);
-                const localSnap = await getDoc(localRef);
+                const existing = sessionSnap.data();
+                const participants = existing.participants || [];
+                const idx = participants.findIndex(
+                    (p) => p.username === (username.trim() || "Anonymous")
+                );
 
-                if (!localSnap.exists()) {
-                    await setDoc(localRef, {
-                        name: "local_locations",
-                        createdAt: serverTimestamp(),
-                        participants: [participantEntry],
-                        events: [
-                            {
-                                type: "saved",
-                                by: username.trim() || "Anonymous",
-                                timestamp: new Date().toISOString(),
-                            },
-                            ...(audioUrl
-                                ? [
-                                      {
-                                          type: "recording_uploaded",
-                                          by: username.trim() || "Anonymous",
-                                          audioUrl,
-                                          timestamp: new Date().toISOString(),
-                                      },
-                                  ]
-                                : []),
-                        ],
-                        // recordings intentionally omitted
-                    });
+                if (idx >= 0) {
+                    // replace with minimal info
+                    participants[idx] = {
+                        username: username.trim(),
+                        deviceName: participantEntry.deviceName,
+                        joinedAt:
+                            participants[idx].joinedAt ||
+                            participantEntry.joinedAt,
+                        location: participantEntry.location,
+                        audioUrl: participantEntry.audioUrl,
+                    };
                 } else {
-                    const existing = localSnap.data();
-                    const participants = existing.participants || [];
-                    const idx = participants.findIndex(
-                        (p) => p.username === (username.trim() || "Anonymous")
-                    );
-                    if (idx >= 0) {
-                        participants[idx] = {
-                            username: username.trim(),
-                            deviceName: participantEntry.deviceName,
-                            joinedAt:
-                                participants[idx].joinedAt ||
-                                participantEntry.joinedAt,
-                            location: participantEntry.location,
-                            audioUrl: participantEntry.audioUrl,
-                        };
-                    } else {
-                        participants.push(participantEntry);
-                    }
-
-                    await updateDoc(localRef, {
-                        participants,
-                        ...(audioUrl
-                            ? {
-                                  events: arrayUnion({
-                                      type: "recording_uploaded",
-                                      by: username.trim() || "Anonymous",
-                                      audioUrl,
-                                      timestamp: new Date().toISOString(),
-                                      duration: audioBlob ? 15 : null,
-                                  }),
-                              }
-                            : {}),
-                    });
+                    participants.push(participantEntry);
                 }
 
-                setSaveMessage(
-                    "✅ Location and audio saved into local session successfully!"
-                );
-                // After a brief pause so the user sees the confirmation, reset UI back to create/join
-                setTimeout(() => {
-                    resetAfterSave();
-                    setSaveMessage("");
-                }, 1500);
+                // update participants array and append recording (if any)
+                // Update participants; if audioUrl exists, append a recording_uploaded event
+                await updateDoc(sessionRef, {
+                    participants,
+                    ...(audioUrl
+                        ? {
+                                events: arrayUnion({
+                                    type: "recording_uploaded",
+                                    by: username.trim() || "Anonymous",
+                                    timestamp: new Date().toISOString(),
+                                }),
+                            }
+                        : {}),
+                });
             }
+
+            setSaveMessage(
+                "✅ Location and audio saved into session successfully!"
+            );
+            // After a brief pause so the user sees the confirmation, reset UI back to create/join
+            setTimeout(() => {
+                resetAfterSave();
+                setSaveMessage("");
+            }, 1500);
         } catch (error) {
             console.error("Error saving location:", error);
 
