@@ -1,192 +1,88 @@
 import { useState, useEffect, useRef } from "react";
 import "./App.css";
 import {
-    collection,
-    query,
-    where,
-    getDocs,
-    addDoc,
-    setDoc,
-    updateDoc,
     doc,
+    setDoc,
+    getDoc,
+    updateDoc,
     onSnapshot,
     serverTimestamp,
-    orderBy,
-    getDoc,
     arrayUnion,
 } from "firebase/firestore";
 import { ref, uploadBytes, getDownloadURL } from "firebase/storage";
 import { db, storage } from "./firebase";
 
 function App() {
-    const [location, setLocation] = useState(null);
-    const [error, setError] = useState(null);
-    const [loading, setLoading] = useState(false);
+    // --------------------------
+    // BASIC STATE
+    // --------------------------
     const [deviceInfo, setDeviceInfo] = useState({ name: "" });
     const [editableName, setEditableName] = useState("");
     const [username, setUsername] = useState("");
-    const [saving, setSaving] = useState(false);
-    const [saveMessage, setSaveMessage] = useState("");
 
-    // Audio recording states
+    const [currentSession, setCurrentSession] = useState(null);
+    const [sessionName, setSessionName] = useState("");
+    const [sessionId, setSessionId] = useState("");
+    const [isInSession, setIsInSession] = useState(false);
+    const [sessionParticipants, setSessionParticipants] = useState([]);
+
+    // Audio recording state
     const [isRecording, setIsRecording] = useState(false);
     const [audioBlob, setAudioBlob] = useState(null);
     const [audioUrl, setAudioUrl] = useState(null);
-    const [mediaRecorder, setMediaRecorder] = useState(null);
-    const [audioChunks, setAudioChunks] = useState([]);
+    const [saving, setSaving] = useState(false);
+    const [saveMessage, setSaveMessage] = useState("");
 
-    // Use ref to persist MediaRecorder instance across renders
+    const [recordCountdown, setRecordCountdown] = useState(null);
+
+    // UI status for horn / recording flow
+    const [hornStatus, setHornStatus] = useState("");
+
+    // --------------------------
+    // REFS
+    // --------------------------
     const mediaRecorderRef = useRef(null);
+    const recordingStartedRef = useRef(false);
+    const recordingStartTimeRef = useRef(null);
 
-    // Use refs to track recording state for onSnapshot callbacks (avoid stale closures)
-    const isAutoRecordingRef = useRef(false);
-    const autoRecordCountdownRef = useRef(0);
-    const autoRecordingCompletedRef = useRef(false);
-    const autoRecordingTriggeredRef = useRef(false);
+    // session ID ref used for saving even after state cleanup
+    const sessionIdRef = useRef(null);
 
-    // Session states
-    const [currentSession, setCurrentSession] = useState(null);
-    const [sessionId, setSessionId] = useState("");
-    const [sessionName, setSessionName] = useState("");
-    const [sessionStartTime, setSessionStartTime] = useState("");
-    const [sessionParticipants, setSessionParticipants] = useState([]);
-    const [isInSession, setIsInSession] = useState(false);
-    const [autoRecordCountdown, setAutoRecordCountdown] = useState(0);
-    const [isAutoRecording, setIsAutoRecording] = useState(false);
-    const [autoRecordingTime, setAutoRecordingTime] = useState(0);
-    // recordings removed from session documents per request
-    const [sessionStartTimeData, setSessionStartTimeData] = useState(null);
-    const [countdownIntervalId, setCountdownIntervalId] = useState(null);
-    const [autoRecordingTriggered, setAutoRecordingTriggered] = useState(false);
-    const [recordingIntervalId, setRecordingIntervalId] = useState(null);
-    const [autoRecordingCompleted, setAutoRecordingCompleted] = useState(false);
+    // Horn detection refs
+    const hornListenerActiveRef = useRef(false);
+    const hornStreamRef = useRef(null);
+    const audioCtxRef = useRef(null);
+    const analyserRef = useRef(null);
+    const scriptNodeRef = useRef(null);
+    const hornEventsRef = useRef([]); // stores timestamps of blasts
+    const lastHornTimeRef = useRef(0);
 
-    // Clock state to show current time on the right side
-    const [currentTime, setCurrentTime] = useState(new Date());
+    // Spectrogram
+    const spectrogramCanvasRef = useRef(null);
+    const spectrogramActiveRef = useRef(false);
+    const triggerMarkPendingRef = useRef(false);
 
-    // Sync refs with state to avoid stale closures in onSnapshot callbacks
-    useEffect(() => {
-        isAutoRecordingRef.current = isAutoRecording;
-    }, [isAutoRecording]);
+    // --------------------------
+    // CONSTANTS
+    // --------------------------
+    const RECORD_SECONDS = 15;
 
-    useEffect(() => {
-        autoRecordCountdownRef.current = autoRecordCountdown;
-    }, [autoRecordCountdown]);
+    // Horn detection constants (WebAudio, float range [-1, 1])
+    const HORN_FFT_SIZE = 2048;
+    const AMP_THRESHOLD = 0.08; // more realistic threshold
+    const DEBOUNCE_MS = 300; // ignore repeats within 300 ms
+    const WINDOW_MS = 2000; // two blasts within 2 seconds
+    const HORN_BAND_LOW = 300; // Hz
+    const HORN_BAND_HIGH = 2000; // Hz
+    const MIN_RATIO = 0.15; // at least 15% energy in horn band
 
-    useEffect(() => {
-        autoRecordingCompletedRef.current = autoRecordingCompleted;
-    }, [autoRecordingCompleted]);
-
-    useEffect(() => {
-        autoRecordingTriggeredRef.current = autoRecordingTriggered;
-    }, [autoRecordingTriggered]);
-
-    useEffect(() => {
-        const id = setInterval(() => {
-            setCurrentTime(new Date());
-        }, 1000);
-        return () => clearInterval(id);
-    }, []);
-
-    // Computed flag: has the scheduled session start time passed?
-    const sessionHasStarted = sessionStartTimeData
-        ? new Date(sessionStartTimeData).getTime() <= currentTime.getTime()
-        : false;
-
-    // Helper function to get current time + 5 minutes in HH:MM format
-    const getCurrentTimePlusFive = () => {
-        const now = new Date();
-        now.setMinutes(now.getMinutes() + 5);
-        return now.toTimeString().slice(0, 5); // Get HH:MM format
-    };
-
-    // Helper function to generate audio filename in format: session_name_user_name_date_time[h:m]
-    const generateAudioFileName = (
-        sessionName,
-        userName,
-        sessionTime = null
-    ) => {
-        console.log("Generating audio filename:", {
-            sessionName,
-            userName,
-            sessionTime,
-        });
-        const timeToUse = sessionTime ? new Date(sessionTime) : new Date();
-        const date = timeToUse.toISOString().split("T")[0]; // YYYY-MM-DD format
-        const time = timeToUse.toTimeString().slice(0, 5); // HH:MM format
-        const cleanSessionName = sessionName
-            ? sessionName.trim().replace(/[^a-zA-Z0-9]/g, "_")
-            : "general";
-        const cleanUserName = userName
-            ? userName.trim().replace(/[^a-zA-Z0-9]/g, "_")
-            : "anonymous";
-
-        return `${cleanSessionName}_${cleanUserName}_${date}_${time}.webm`;
-    };
-
-    // Request location and microphone permissions and return location info
-    const requestLocationAndMic = async () => {
-        // request location via Promise wrapper
-        const getPosition = () =>
-            new Promise((resolve, reject) => {
-                if (!navigator.geolocation) {
-                    reject(new Error("Geolocation not supported"));
-                    return;
-                }
-                navigator.geolocation.getCurrentPosition(
-                    (pos) => resolve(pos),
-                    (err) => reject(err),
-                    { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
-                );
-            });
-
-        try {
-            const position = await getPosition();
-
-            // request microphone permission (prompt) - then stop tracks immediately
-            try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    audio: true,
-                });
-                // stop tracks immediately - we only need permission
-                stream.getTracks().forEach((t) => t.stop());
-            } catch (micErr) {
-                // microphone permission denied or not available
-                console.warn(
-                    "Microphone permission not granted or unavailable",
-                    micErr
-                );
-                // still continue if location is available
-            }
-
-            return {
-                latitude: position.coords.latitude,
-                longitude: position.coords.longitude,
-                accuracy: position.coords.accuracy,
-                timestamp: new Date(position.timestamp).toISOString(),
-            };
-        } catch (err) {
-            throw err;
-        }
-    };
-
-    // Create a safe session document ID from a session name
-    const makeSessionId = (name) => {
-        if (!name) return "";
-        return name
-            .trim()
-            .toLowerCase()
-            .replace(/\s+/g, "-")
-            .replace(/[^a-z0-9\-_.]/g, "")
-            .slice(0, 80);
-    };
-
-    // Function to detect device information
+    // --------------------------
+    // DEVICE INFO
+    // --------------------------
     const detectDeviceInfo = () => {
         const userAgent = navigator.userAgent;
         let deviceName = "Unknown Device";
 
-        // Detect device type and browser
         if (
             /Mobile|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
                 userAgent
@@ -207,7 +103,6 @@ function App() {
             deviceName = "Linux PC";
         }
 
-        // Detect browser
         let browser = "";
         if (/Chrome/i.test(userAgent) && !/Edge/i.test(userAgent)) {
             browser = "Chrome";
@@ -223,225 +118,550 @@ function App() {
 
         const deviceNameWithBrowser = `${deviceName} (${browser})`;
 
-        setDeviceInfo({
-            name: deviceNameWithBrowser,
-        });
+        setDeviceInfo({ name: deviceNameWithBrowser });
         setEditableName(deviceNameWithBrowser);
     };
 
-    // Generate device info when component mounts
-    useEffect(() => {
-        detectDeviceInfo();
-        checkFirebaseConfig();
-        // Set default session start time to current time + 5 minutes
-        setSessionStartTime(getCurrentTimePlusFive());
-    }, []);
+    // --------------------------
+    // SESSION UTIL
+    // --------------------------
+    const makeSessionId = (name) => {
+        if (!name) return "";
+        return name
+            .trim()
+            .toLowerCase()
+            .replace(/\s+/g, "-")
+            .replace(/[^a-z0-9\-_.]/g, "")
+            .slice(0, 80);
+    };
 
-    // Periodic check for auto-recording when in session
-    useEffect(() => {
-        if (
-            !isInSession ||
-            !currentSession ||
-            isAutoRecording ||
-            autoRecordCountdown > 0 ||
-            autoRecordingCompleted
-        )
-            return;
-        // Poll session document periodically to check start time and trigger countdown
-        const interval = setInterval(async () => {
-            try {
-                const sessionRef = doc(db, "sessions", currentSession);
-                const sessionSnap = await getDoc(sessionRef);
-                if (sessionSnap.exists()) {
-                    const data = sessionSnap.data();
-                    checkAutoRecordTime(data.startTime);
-                }
-            } catch (err) {
-                console.error("Error checking session for auto-record:", err);
-            }
-        }, 5000);
+    const generateAudioFileName = (sessionName, userName) => {
+        const timeToUse = new Date();
+        const date = timeToUse.toISOString().split("T")[0]; // YYYY-MM-DD
+        const time = timeToUse.toTimeString().slice(0, 5); // HH:MM
+        const cleanSessionName = sessionName
+            ? sessionName.trim().replace(/[^a-zA-Z0-9]/g, "_")
+            : "general";
+        const cleanUserName = userName
+            ? userName.trim().replace(/[^a-zA-Z0-9]/g, "_")
+            : "anonymous";
 
-        return () => clearInterval(interval);
-    }, [
-        isInSession,
-        currentSession,
-        isAutoRecording,
-        autoRecordCountdown,
-        autoRecordingCompleted,
-    ]);
+        // No extension here; we'll add ".wav" when uploading
+        return `${cleanSessionName}_${cleanUserName}_${date}_${time}`;
+    };
 
-    // Cleanup intervals on component unmount
-    useEffect(() => {
-        return () => {
-            if (countdownIntervalId) {
-                clearInterval(countdownIntervalId);
-            }
-            if (recordingIntervalId) {
-                clearInterval(recordingIntervalId);
-            }
-        };
-    }, [countdownIntervalId, recordingIntervalId]);
+    // --------------------------
+    // WAV ENCODING HELPERS
+    // --------------------------
+    const writeString = (view, offset, str) => {
+        for (let i = 0; i < str.length; i++) {
+            view.setUint8(offset + i, str.charCodeAt(i));
+        }
+    };
 
-    const getCurrentLocation = () => {
-        if (!navigator.geolocation) {
-            setError("Geolocation is not supported by this browser.");
-            return;
+    const encodeWav = (audioBuffer) => {
+        // Mono: use first channel
+        const channelData = audioBuffer.getChannelData(0);
+        const numChannels = 1;
+        const sampleRate = audioBuffer.sampleRate;
+        const numFrames = channelData.length;
+
+        const blockAlign = numChannels * 2; // 16-bit
+        const byteRate = sampleRate * blockAlign;
+        const dataSize = numFrames * blockAlign;
+
+        const buffer = new ArrayBuffer(44 + dataSize);
+        const view = new DataView(buffer);
+
+        // RIFF header
+        writeString(view, 0, "RIFF");
+        view.setUint32(4, 36 + dataSize, true);
+        writeString(view, 8, "WAVE");
+
+        // fmt chunk
+        writeString(view, 12, "fmt ");
+        view.setUint32(16, 16, true); // chunk size
+        view.setUint16(20, 1, true); // PCM
+        view.setUint16(22, numChannels, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, byteRate, true);
+        view.setUint16(32, blockAlign, true);
+        view.setUint16(34, 16, true); // bits per sample
+
+        // data chunk
+        writeString(view, 36, "data");
+        view.setUint32(40, dataSize, true);
+
+        // PCM samples
+        let offset = 44;
+        for (let i = 0; i < numFrames; i++) {
+            let sample = channelData[i];
+            sample = Math.max(-1, Math.min(1, sample));
+            view.setInt16(
+                offset,
+                sample < 0 ? sample * 0x8000 : sample * 0x7fff,
+                true
+            );
+            offset += 2;
         }
 
-        setLoading(true);
-        setError(null);
+        return new Blob([view], { type: "audio/wav" });
+    };
 
-        navigator.geolocation.getCurrentPosition(
-            (position) => {
-                setLocation({
-                    latitude: position.coords.latitude,
-                    longitude: position.coords.longitude,
-                    accuracy: position.coords.accuracy,
-                    timestamp: new Date(position.timestamp).toLocaleString(),
-                });
-                setLoading(false);
-            },
-            (error) => {
-                let errorMessage = "An unknown error occurred.";
-                let suggestion = "";
+    const convertWebMToWav = async (webmBlob) => {
+        const arrayBuffer = await webmBlob.arrayBuffer();
+        const AudioContextClass =
+            window.AudioContext || window.webkitAudioContext;
+        const ctx = new AudioContextClass();
+        const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
+        const wavBlob = encodeWav(audioBuffer);
+        ctx.close();
+        return wavBlob;
+    };
 
-                switch (error.code) {
-                    case error.PERMISSION_DENIED:
-                        errorMessage = "Geolocation access denied.";
-                        suggestion =
-                            "Please allow location access in your browser settings, or try running on localhost instead of --host mode.";
-                        break;
-                    case error.POSITION_UNAVAILABLE:
-                        errorMessage = "Location information is unavailable.";
-                        suggestion =
-                            "Please check your GPS/WiFi connection and try again.";
-                        break;
-                    case error.TIMEOUT:
-                        errorMessage =
-                            "The request to get user location timed out.";
-                        suggestion = "Please try again in a moment.";
-                        break;
-                }
-                setError(`${errorMessage} ${suggestion}`);
-                setLoading(false);
-            },
-            {
-                enableHighAccuracy: true,
-                timeout: 10000,
-                maximumAge: 0,
+    // --------------------------
+    // SPECTROGRAM
+    // --------------------------
+    const getSpectrogramColor = (intensity) => {
+        const grey = Math.floor(255 * intensity);
+        return `rgb(${grey}, ${grey}, ${grey})`; // grayscale
+    };
+
+    const startSpectrogram = (analyser) => {
+        const canvas = spectrogramCanvasRef.current;
+        if (!canvas) return;
+
+        const ctx = canvas.getContext("2d");
+        const width = canvas.width;
+        const height = canvas.height;
+
+        const freqBins = analyser.frequencyBinCount;
+        const dataArray = new Uint8Array(freqBins);
+
+        spectrogramActiveRef.current = true;
+
+        const draw = () => {
+            if (!spectrogramActiveRef.current) return;
+            requestAnimationFrame(draw);
+
+            analyser.getByteFrequencyData(dataArray);
+
+            // Shift image left by 1 pixel
+            const imageData = ctx.getImageData(1, 0, width - 1, height);
+            ctx.putImageData(imageData, 0, 0);
+
+            // Clear rightmost column (white background)
+            ctx.fillStyle = "#fff";
+            ctx.fillRect(width - 1, 0, 1, height);
+
+            // Draw new spectrum column at right edge
+            for (let i = 0; i < freqBins; i++) {
+                const value = dataArray[i]; // 0..255
+                const intensity = value / 255;
+                const y = height - Math.floor((i / freqBins) * height);
+                ctx.fillStyle = getSpectrogramColor(intensity);
+                ctx.fillRect(width - 1, y, 1, 1);
             }
-        );
+
+            // If horn triggered this frame, draw a vertical red line at the right edge
+            if (triggerMarkPendingRef.current) {
+                ctx.strokeStyle = "red";
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(width - 1, 0);
+                ctx.lineTo(width - 1, height);
+                ctx.stroke();
+                triggerMarkPendingRef.current = false;
+            }
+        };
+
+        draw();
     };
 
-    const copyToClipboard = (text) => {
-        navigator.clipboard
-            .writeText(text)
-            .then(() => {
-                alert("Coordinates copied to clipboard!");
-            })
-            .catch(() => {
-                alert("Failed to copy to clipboard");
-            });
+    // --------------------------
+    // HORN DETECTION
+    // --------------------------
+    const stopHornListener = () => {
+        if (scriptNodeRef.current) {
+            scriptNodeRef.current.disconnect();
+            scriptNodeRef.current.onaudioprocess = null;
+            scriptNodeRef.current = null;
+        }
+        if (analyserRef.current) {
+            analyserRef.current.disconnect();
+            analyserRef.current = null;
+        }
+        if (audioCtxRef.current) {
+            audioCtxRef.current.close();
+            audioCtxRef.current = null;
+        }
+        if (hornStreamRef.current) {
+            hornStreamRef.current.getTracks().forEach((t) => t.stop());
+            hornStreamRef.current = null;
+        }
+        hornListenerActiveRef.current = false;
+        hornEventsRef.current = [];
+        lastHornTimeRef.current = 0;
+
+        spectrogramActiveRef.current = false;
     };
 
-    // Audio recording functions
-    const startRecording = async () => {
+    const startHornListener = async () => {
         try {
-            console.log("Starting recording...");
+            if (hornListenerActiveRef.current) {
+                console.log("Horn listener already active.");
+                return;
+            }
+
             const stream = await navigator.mediaDevices.getUserMedia({
                 audio: true,
             });
-            const recorder = new MediaRecorder(stream);
-            const chunks = [];
 
-            recorder.ondataavailable = (event) => {
-                if (event.data.size > 0) {
-                    chunks.push(event.data);
+            const AudioContextClass =
+                window.AudioContext || window.webkitAudioContext;
+            const audioCtx = new AudioContextClass();
+            if (audioCtx.state === "suspended") {
+                await audioCtx.resume();
+            }
+
+            const source = audioCtx.createMediaStreamSource(stream);
+            const analyser = audioCtx.createAnalyser();
+            analyser.fftSize = HORN_FFT_SIZE;
+            const scriptNode = audioCtx.createScriptProcessor(
+                HORN_FFT_SIZE,
+                1,
+                1
+            );
+
+            hornStreamRef.current = stream;
+            audioCtxRef.current = audioCtx;
+            analyserRef.current = analyser;
+            scriptNodeRef.current = scriptNode;
+            hornListenerActiveRef.current = true;
+            hornEventsRef.current = [];
+            lastHornTimeRef.current = 0;
+
+            setHornStatus("Listening for horn (2 blasts)...");
+            spectrogramCanvasRef.current =
+                document.getElementById("spectrogram");
+            startSpectrogram(analyser);
+
+            source.connect(analyser);
+            analyser.connect(scriptNode);
+            scriptNode.connect(audioCtx.destination);
+
+            const freqData = new Uint8Array(analyser.frequencyBinCount);
+
+            scriptNode.onaudioprocess = (event) => {
+                if (!hornListenerActiveRef.current) return;
+                if (recordingStartedRef.current) return; // already triggered
+
+                const input = event.inputBuffer.getChannelData(0);
+                let peak = 0;
+                for (let i = 0; i < input.length; i++) {
+                    const v = Math.abs(input[i]);
+                    if (v > peak) peak = v;
+                }
+
+                // Amplitude gate
+                if (peak < AMP_THRESHOLD) return;
+
+                // Frequency band check
+                analyser.getByteFrequencyData(freqData);
+                let totalEnergy = 0;
+                let bandEnergy = 0;
+                const sampleRate = audioCtx.sampleRate;
+                const binHz = sampleRate / analyser.fftSize;
+
+                for (let i = 0; i < freqData.length; i++) {
+                    const freq = i * binHz;
+                    const val = freqData[i]; // 0..255
+                    const energy = val + 1e-6;
+                    totalEnergy += energy;
+                    if (freq >= HORN_BAND_LOW && freq <= HORN_BAND_HIGH) {
+                        bandEnergy += energy;
+                    }
+                }
+
+                const ratio = bandEnergy / (totalEnergy + 1e-6);
+                if (ratio < MIN_RATIO) return;
+
+                const now = performance.now();
+
+                // Debounce to avoid duplicate triggers from same blast
+                if (now - lastHornTimeRef.current < DEBOUNCE_MS) return;
+                lastHornTimeRef.current = now;
+
+                // Blast timing logic:
+                // If no previous blast or previous blast older than WINDOW_MS,
+                // treat this as a NEW first blast and discard any old one.
+                const lastBlast =
+                    hornEventsRef.current.length > 0
+                        ? hornEventsRef.current[hornEventsRef.current.length - 1]
+                        : null;
+
+                if (!lastBlast || now - lastBlast > WINDOW_MS) {
+                    // New first blast
+                    hornEventsRef.current = [now];
+                    setHornStatus("First horn blast detected...");
+                    console.log(
+                        "🔊 First horn blast detected",
+                        "peak=",
+                        peak.toFixed(3),
+                        "ratio=",
+                        ratio.toFixed(3)
+                    );
+                    return;
+                }
+
+                // Second blast within WINDOW_MS → trigger
+                hornEventsRef.current.push(now);
+                setHornStatus(
+                    `${hornEventsRef.current.length} horn blasts detected...`
+                );
+                console.log(
+                    "🔊 Second horn blast detected",
+                    hornEventsRef.current.length,
+                    "peak=",
+                    peak.toFixed(3),
+                    "ratio=",
+                    ratio.toFixed(3)
+                );
+
+                if (hornEventsRef.current.length >= 2) {
+                    console.log("🚀 Horn trigger confirmed (2 blasts)!");
+                    triggerMarkPendingRef.current = true; // mark on spectrogram
+                    recordingStartedRef.current = true;
+                    setHornStatus("Trigger confirmed – starting recording...");
+                    stopHornListener(); // stop listening + spectrogram
+                    startRecording();
                 }
             };
 
-            recorder.onstop = () => {
-                console.log("MediaRecorder stopped, creating blob");
-                const blob = new Blob(chunks, { type: "audio/wav" });
-                setAudioBlob(blob);
-                const url = URL.createObjectURL(blob);
-                setAudioUrl(url);
-                setAudioChunks(chunks);
-                stream.getTracks().forEach((track) => track.stop());
-            };
-
-            recorder.start();
-            console.log("MediaRecorder started, state:", recorder.state);
-            setMediaRecorder(recorder);
-            mediaRecorderRef.current = recorder; // Store in ref for reliable access
-            setIsRecording(true);
-
-            setAudioChunks([]);
-        } catch (error) {
-            console.error("Error starting recording:", error);
-            alert("Error accessing microphone. Please check permissions.");
-        }
-    };
-
-    const stopRecording = () => {
-        const currentRecorder = mediaRecorderRef.current;
-        console.log("stopRecording called", {
-            mediaRecorder: !!currentRecorder,
-            mediaRecorderState: currentRecorder?.state,
-            isRecording,
-            isAutoRecording,
-        });
-        if (currentRecorder && currentRecorder.state === "recording") {
-            console.log("Stopping media recorder");
-            currentRecorder.stop();
-            setIsRecording(false);
-            mediaRecorderRef.current = null; // Clear the ref
-        } else {
-            console.log(
-                "Cannot stop recording - mediaRecorder state:",
-                currentRecorder?.state,
-                "isRecording:",
-                isRecording
+            console.log("Horn listener started. Blast twice to trigger.");
+        } catch (err) {
+            console.error("Failed to start horn listener:", err);
+            alert(
+                "Could not access microphone for horn detection. Check permissions."
             );
         }
     };
 
-    const clearRecording = () => {
-        setAudioBlob(null);
-        setAudioUrl(null);
-        setAudioChunks([]);
-        mediaRecorderRef.current = null; // Clear the ref
-        if (audioUrl) {
-            URL.revokeObjectURL(audioUrl);
+    // --------------------------
+    // RECORDING
+    // --------------------------
+    const startRecording = async () => {
+        try {
+            if (isRecording) return;
+
+            console.log("Starting recording (horn-triggered)...");
+            const stream = await navigator.mediaDevices.getUserMedia({
+                audio: true,
+            });
+
+            const recorder = new MediaRecorder(stream);
+            const chunks = [];
+
+            recorder.ondataavailable = (event) => {
+                if (event.data && event.data.size > 0) {
+                    chunks.push(event.data);
+                }
+            };
+
+            recorder.onstop = async () => {
+                try {
+                    console.log("MediaRecorder stopped, assembling WAV...");
+
+                    const webmBlob = new Blob(chunks, { type: "audio/webm" });
+                    const wavBlob = await convertWebMToWav(webmBlob);
+
+                    const url = URL.createObjectURL(wavBlob);
+                    setAudioBlob(wavBlob);
+                    setAudioUrl(url);
+
+                    // Stop tracks
+                    stream.getTracks().forEach((t) => t.stop());
+
+                    setIsRecording(false);
+                    setRecordCountdown(null);
+                    setHornStatus(
+                        "Recording finished — saving to session and ending..."
+                    );
+
+                    // Save WAV to Firebase + end session
+                    await saveRecordingToSession(wavBlob); // upload first
+                    setHornStatus("Recording uploaded — ending session...");
+                    await endSessionAfterSave(); // end AFTER upload
+                } catch (err) {
+                    console.error("Error processing recording:", err);
+                    setHornStatus("Error while processing recording.");
+                }
+            };
+
+            mediaRecorderRef.current = recorder;
+            setIsRecording(true);
+            recordingStartTimeRef.current = new Date().toISOString();
+
+            setHornStatus("Recording (15s)...");
+            spectrogramActiveRef.current = false; // hide spectrogram
+            setRecordCountdown(RECORD_SECONDS);
+
+            let remaining = RECORD_SECONDS;
+            const countdownInterval = setInterval(() => {
+                remaining -= 1;
+                setRecordCountdown(remaining);
+                if (remaining <= 0) {
+                    clearInterval(countdownInterval);
+                }
+            }, 1000);
+
+            recorder.start();
+            console.log("MediaRecorder started.");
+
+            // Stop after fixed duration
+            setTimeout(() => {
+                if (recorder.state === "recording") {
+                    recorder.stop();
+                }
+            }, RECORD_SECONDS * 1000);
+        } catch (err) {
+            console.error("Error starting recording:", err);
+            alert("Failed to start recording. Check microphone permissions.");
         }
     };
 
-    // Recording timer and manual pause/resume removed (no manual recording UI)
+    // --------------------------
+    // SAVE TO SESSION (WAV)
+    // --------------------------
+    const saveRecordingToSession = async (blobToSave) => {
+        const blob = blobToSave || audioBlob;
 
-    // Session Management Functions
+        if (!blob) {
+            alert("No recording to save.");
+            return;
+        }
+
+        // Use stable session ID captured in sessionIdRef
+        const sessionIdForSave =
+            sessionIdRef.current || currentSession || sessionName || sessionId;
+
+        if (!sessionIdForSave) {
+            console.error("No valid session ID to save into.");
+            setSaveMessage("❌ No valid session to save into.");
+            return;
+        }
+
+        try {
+            setSaving(true);
+            setSaveMessage("");
+
+            const fileName = generateAudioFileName(
+                sessionIdForSave,
+                username || "Anonymous"
+            );
+            const audioRef = ref(storage, `sessions/${fileName}.wav`);
+            await uploadBytes(audioRef, blob);
+            const downloadUrl = await getDownloadURL(audioRef);
+
+            const sessionRef = doc(db, "sessions", sessionIdForSave);
+            await updateDoc(sessionRef, {
+                events: arrayUnion({
+                    type: "recording_uploaded",
+                    by: username.trim() || "Anonymous",
+                    timestamp: new Date().toISOString(),
+                    audioUrl: downloadUrl,
+                    recordingStart: recordingStartTimeRef.current,
+                    format: "wav",
+                }),
+            });
+
+            setSaveMessage("✅ Recording (WAV) uploaded to session.");
+        } catch (e) {
+            console.error("Error uploading recording:", e);
+            setSaveMessage("❌ Failed to upload recording.");
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const clearRecording = () => {
+        if (audioUrl) {
+            try {
+                URL.revokeObjectURL(audioUrl);
+            } catch (_) {}
+        }
+        setAudioBlob(null);
+        setAudioUrl(null);
+        setSaveMessage("");
+    };
+
+    // --------------------------
+    // END SESSION AFTER SAVE
+    // --------------------------
+    const cleanupLocalSessionState = () => {
+        stopHornListener();
+        setCurrentSession(null);
+        setIsInSession(false);
+        setSessionId("");
+        setSessionName("");
+        setSessionParticipants([]);
+        sessionIdRef.current = null;
+        recordingStartedRef.current = false;
+        setHornStatus("");
+    };
+
+    const endSessionAfterSave = async () => {
+        const sessionIdForSave =
+            sessionIdRef.current || currentSession || sessionName || sessionId;
+
+        if (!sessionIdForSave) {
+            cleanupLocalSessionState();
+            return;
+        }
+
+        try {
+            const sessionRef = doc(db, "sessions", sessionIdForSave);
+            await updateDoc(sessionRef, {
+                status: "finished",
+                events: arrayUnion({
+                    type: "session_finished",
+                    by: username.trim() || "Anonymous",
+                    timestamp: new Date().toISOString(),
+                }),
+            });
+        } catch (err) {
+            console.error("Error ending session:", err);
+        }
+
+        cleanupLocalSessionState();
+    };
+
+    // --------------------------
+    // SESSION MGMT
+    // --------------------------
+    const listenToSession = (sessionId) => {
+        const sessionRef = doc(db, "sessions", sessionId);
+        return onSnapshot(sessionRef, (snap) => {
+            if (snap.exists()) {
+                const data = snap.data();
+                setSessionParticipants(data.participants || []);
+            }
+        });
+    };
+
     const createSession = async () => {
         if (!sessionName.trim()) {
             alert("Please enter a session name!");
             return;
         }
-
-        if (!sessionStartTime) {
-            alert("Please set a start time!");
+        if (!username.trim()) {
+            alert("Please enter a username!");
             return;
         }
 
         try {
-            // Convert time-only input to full datetime (today + selected time)
-            const today = new Date();
-            const [hours, minutes] = sessionStartTime.split(":");
-            const sessionDateTime = new Date(today);
-            sessionDateTime.setHours(parseInt(hours), parseInt(minutes), 0, 0);
-
             const sessionIdFromName = makeSessionId(sessionName);
-
             const sessionRef = doc(db, "sessions", sessionIdFromName);
-
-            // Check if a session with the same ID/name already exists
             const existing = await getDoc(sessionRef);
             if (existing.exists()) {
                 alert(
@@ -450,707 +670,178 @@ function App() {
                 return;
             }
 
-            // Request creator's location and microphone permission
-            let creatorLocation = null;
-            try {
-                creatorLocation = await requestLocationAndMic();
-            } catch (err) {
-                alert("Please allow location access to create a session.");
-                return;
-            }
-            // set global location so Save to DB area can use it
-            setLocation({
-                latitude: creatorLocation.latitude,
-                longitude: creatorLocation.longitude,
-                accuracy: creatorLocation.accuracy,
-                timestamp: new Date(creatorLocation.timestamp).toLocaleString(),
-            });
+            const nowIso = new Date().toISOString();
 
             const sessionData = {
                 name: sessionName.trim(),
-                startTime: sessionDateTime.toISOString(),
                 createdAt: serverTimestamp(),
                 participants: [
                     {
                         username: username.trim() || "Anonymous",
-                        deviceName: editableName.trim() || deviceInfo.name,
-                        joinedAt: new Date().toISOString(),
+                        deviceName:
+                            editableName.trim() || deviceInfo.name || "",
+                        joinedAt: nowIso,
                         isActive: true,
-                        location: creatorLocation,
                     },
                 ],
-                // events log for session lifecycle (creation, joins, leaves)
                 events: [
                     {
                         type: "created",
                         by: username.trim() || "Anonymous",
-                        timestamp: new Date().toISOString(),
+                        timestamp: nowIso,
                     },
                 ],
                 status: "active",
-                // recordings field intentionally omitted
             };
 
-            // Use setDoc to create the document with the session name as ID
             await setDoc(sessionRef, sessionData);
 
             setCurrentSession(sessionIdFromName);
-            setSessionId(sessionIdFromName);
+            sessionIdRef.current = sessionIdFromName;
             setIsInSession(true);
-            setAutoRecordingCompleted(false); // Reset auto-recording completion flag for new session
-
-            // Start listening to session updates
             listenToSession(sessionIdFromName);
-
-            // Automatically get location when creating session
-            if (!location) {
-                getCurrentLocation();
-            }
+            recordingStartedRef.current = false;
+            setHornStatus("");
+            startHornListener();
 
             alert(
-                `Session "${sessionName}" created successfully! Session ID/Name: ${sessionIdFromName}`
+                `Session "${sessionName}" created.\nHorn-trigger is now active.`
             );
-        } catch (error) {
-            console.error("Error creating session:", error);
-            alert("Failed to create session. Please try again.");
+        } catch (err) {
+            console.error("Error creating session:", err);
+            alert("Failed to create session. Check console for details.");
         }
     };
 
     const joinSession = async () => {
         if (!sessionId.trim()) {
-            alert("Please enter a session ID!");
+            alert("Please enter a session name to join!");
+            return;
+        }
+        if (!username.trim()) {
+            alert("Please enter a username!");
             return;
         }
 
         try {
-            // treat the entered sessionId as a session name; convert to slug
             const sessionIdFromName = makeSessionId(sessionId.trim());
             const sessionRef = doc(db, "sessions", sessionIdFromName);
+            const snap = await getDoc(sessionRef);
 
-            const sessionDoc = await getDoc(sessionRef);
-            if (!sessionDoc.exists()) {
-                alert("Session not found! Please check the session name.");
+            if (!snap.exists()) {
+                alert("Session not found. Check the session name.");
                 return;
             }
 
-            // Prevent joining if session start time has already passed
-            const sessionStart = sessionDoc.data().startTime;
-            if (sessionStart) {
-                const startDate = new Date(sessionStart);
-                if (new Date().getTime() >= startDate.getTime()) {
-                    alert(
-                        "Cannot join: session has already started or completed."
-                    );
-                    return;
-                }
-            }
+            const data = snap.data();
+            const nowIso = new Date().toISOString();
+            const participants = data.participants || [];
 
-            // Request participant's location and microphone permission
-            let participantLocation = null;
-            try {
-                participantLocation = await requestLocationAndMic();
-            } catch (err) {
-                alert("Please allow location access to join the session.");
-                return;
-            }
-
-            // set global location state
-            setLocation({
-                latitude: participantLocation.latitude,
-                longitude: participantLocation.longitude,
-                accuracy: participantLocation.accuracy,
-                timestamp: new Date(
-                    participantLocation.timestamp
-                ).toLocaleString(),
-            });
-
-            // Add participant to session (read-modify-write)
-            const participantData = {
+            const newParticipant = {
                 username: username.trim() || "Anonymous",
-                deviceName: editableName.trim() || deviceInfo.name,
-                joinedAt: new Date().toISOString(),
+                deviceName: editableName.trim() || deviceInfo.name || "",
+                joinedAt: nowIso,
                 isActive: true,
-                location: participantLocation,
             };
 
-            const currentParticipants = sessionDoc.data().participants || [];
             await updateDoc(sessionRef, {
-                participants: [...currentParticipants, participantData],
+                participants: [...participants, newParticipant],
                 events: arrayUnion({
                     type: "joined",
                     by: username.trim() || "Anonymous",
-                    timestamp: new Date().toISOString(),
+                    timestamp: nowIso,
                 }),
             });
 
             setCurrentSession(sessionIdFromName);
+            sessionIdRef.current = sessionIdFromName;
             setIsInSession(true);
-            setAutoRecordingCompleted(false); // Reset auto-recording completion flag for joined session
-
-            // Start listening to session updates
             listenToSession(sessionIdFromName);
+            recordingStartedRef.current = false;
+            setHornStatus("");
+            startHornListener();
 
-            // Automatically get location when joining session
-            if (!location) {
-                getCurrentLocation();
-            }
-
-            alert(`Successfully joined session!`);
-        } catch (error) {
-            console.error("Error joining session:", error);
-            alert("Failed to join session. Please try again.");
+            alert(
+                `Joined session "${data.name || sessionIdFromName}". Horn-trigger is active.`
+            );
+        } catch (err) {
+            console.error("Error joining session:", err);
+            alert("Failed to join session. Check console for details.");
         }
     };
 
     const leaveSession = async () => {
-        if (!currentSession) return;
+        if (!currentSession && !sessionIdRef.current) {
+            cleanupLocalSessionState();
+            return;
+        }
+
+        const sessionToUse =
+            sessionIdRef.current || currentSession || sessionName || sessionId;
 
         try {
-            const sessionRef = doc(db, "sessions", currentSession);
-            const sessionSnapshot = await getDoc(sessionRef);
-
-            if (sessionSnapshot.exists()) {
-                const currentParticipants =
-                    sessionSnapshot.data().participants || [];
-                const updatedParticipants = currentParticipants.map((p) =>
+            const sessionRef = doc(db, "sessions", sessionToUse);
+            const snap = await getDoc(sessionRef);
+            if (snap.exists()) {
+                const data = snap.data();
+                const participants = data.participants || [];
+                const updated = participants.map((p) =>
                     p.username === (username.trim() || "Anonymous")
                         ? { ...p, isActive: false }
                         : p
                 );
 
                 await updateDoc(sessionRef, {
-                    participants: updatedParticipants,
-                });
-
-                // If the user leaves before the scheduled start time, log a 'left' event
-                try {
-                    const startTime = sessionSnapshot.data().startTime;
-                    if (startTime) {
-                        const startDate = new Date(startTime);
-                        if (new Date().getTime() < startDate.getTime()) {
-                            await updateDoc(sessionRef, {
-                                events: arrayUnion({
-                                    type: "left",
-                                    by: username.trim() || "Anonymous",
-                                    timestamp: new Date().toISOString(),
-                                }),
-                            });
-                        }
-                    }
-                } catch (e) {
-                    console.warn("Could not log leave event:", e);
-                }
-            }
-
-            setCurrentSession(null);
-            setSessionId("");
-            setIsInSession(false);
-            setAutoRecordCountdown(0);
-            setIsAutoRecording(false);
-            setAutoRecordingTime(0);
-            setAutoRecordingTriggered(false);
-            setAutoRecordingCompleted(false); // Reset auto-recording completion flag
-
-            // Reset refs to match state
-            isAutoRecordingRef.current = false;
-            autoRecordCountdownRef.current = 0;
-            autoRecordingCompletedRef.current = false;
-            autoRecordingTriggeredRef.current = false;
-
-            // Clear any existing countdown interval
-            if (countdownIntervalId) {
-                clearInterval(countdownIntervalId);
-                setCountdownIntervalId(null);
-            }
-
-            // Clear any existing recording interval
-            if (recordingIntervalId) {
-                clearInterval(recordingIntervalId);
-                setRecordingIntervalId(null);
-            }
-
-            alert("Left session successfully!");
-        } catch (error) {
-            console.error("Error leaving session:", error);
-            alert("Failed to leave session.");
-        }
-    };
-
-    const listenToSession = (sessionId) => {
-        const sessionRef = doc(db, "sessions", sessionId);
-
-        const unsubscribe = onSnapshot(sessionRef, (doc) => {
-            if (doc.exists()) {
-                const sessionData = doc.data();
-                setSessionParticipants(sessionData.participants || []);
-                // recordings were removed from session documents
-                setSessionStartTimeData(sessionData.startTime);
-
-                // If the session document indicates completion, stop listening for time checks.
-                if (sessionData.status === "completed") {
-                    setAutoRecordingCompleted(true);
-                    autoRecordingCompletedRef.current = true;
-                    return; // Do not proceed to check time
-                }
-
-                // Check if it's time to start auto-recording (only if not already recording or counting down)
-                // Use refs to avoid stale closure values when session document is updated
-                if (
-                    !isAutoRecordingRef.current &&
-                    autoRecordCountdownRef.current === 0 &&
-                    !autoRecordingCompletedRef.current
-                ) {
-                    checkAutoRecordTime(sessionData.startTime);
-                }
-            }
-        });
-
-        return unsubscribe;
-    };
-
-    const checkAutoRecordTime = (startTime) => {
-        // Use ref to check current state (avoid stale closure)
-        if (!startTime || autoRecordingCompletedRef.current) return;
-
-        const now = new Date();
-        const scheduledTime = new Date(startTime);
-        const timeDiff = scheduledTime.getTime() - now.getTime();
-
-        console.log("Time check:", {
-            now: now.toLocaleTimeString(),
-            scheduled: scheduledTime.toLocaleTimeString(),
-            timeDiff: timeDiff,
-            timeDiffSeconds: Math.ceil(timeDiff / 1000),
-            autoRecordingCompleted: autoRecordingCompletedRef.current,
-        });
-
-        if (timeDiff > 0 && timeDiff <= 30000) {
-            // Within 30 seconds - only start countdown if not already running
-            if (!countdownIntervalId) {
-                const countdownValue = Math.ceil(timeDiff / 1000);
-                setAutoRecordCountdown(countdownValue);
-                // Update ref immediately to prevent race conditions
-                autoRecordCountdownRef.current = countdownValue;
-
-                // Start countdown
-                const intervalId = setInterval(() => {
-                    setAutoRecordCountdown((prev) => {
-                        const newValue = prev <= 1 ? 0 : prev - 1;
-                        // Update ref immediately
-                        autoRecordCountdownRef.current = newValue;
-                        if (prev <= 1) {
-                            clearInterval(intervalId);
-                            setCountdownIntervalId(null);
-                            if (!autoRecordingTriggeredRef.current) {
-                                setAutoRecordingTriggered(true);
-                                startAutoRecording();
-                            }
-                            return 0;
-                        }
-                        return prev - 1;
-                    });
-                }, 1000);
-
-                setCountdownIntervalId(intervalId);
-            }
-        } else if (timeDiff <= 0) {
-            // Time has passed, start recording immediately
-            console.log(
-                "Scheduled time has passed, starting recording immediately"
-            );
-            // Clear any existing countdown
-            if (countdownIntervalId) {
-                clearInterval(countdownIntervalId);
-                setCountdownIntervalId(null);
-            }
-            // Use ref to check current state (avoid stale closure)
-            if (!autoRecordingTriggeredRef.current) {
-                setAutoRecordingTriggered(true);
-                startAutoRecording();
-            }
-        } else {
-            // More than 30 seconds away, clear countdown and interval
-            if (countdownIntervalId) {
-                clearInterval(countdownIntervalId);
-                setCountdownIntervalId(null);
-            }
-            setAutoRecordCountdown(0);
-            // Update ref immediately
-            autoRecordCountdownRef.current = 0;
-        }
-    };
-
-    const startAutoRecording = async () => {
-        // Use refs to check current state (avoid stale closure)
-        if (isAutoRecordingRef.current || autoRecordingTriggeredRef.current) return;
-
-        setAutoRecordingTriggered(true);
-        setIsAutoRecording(true);
-        setAutoRecordingTime(15);
-        // Update refs immediately to prevent race conditions
-        autoRecordingTriggeredRef.current = true;
-        isAutoRecordingRef.current = true;
-        await startRecording();
-
-        // Start countdown timer for auto-recording (only if not already running)
-        if (!recordingIntervalId) {
-            console.log("Starting auto-recording timer for 15 seconds");
-            const intervalId = setInterval(() => {
-                setAutoRecordingTime((prev) => {
-                    console.log("Auto-recording timer tick:", prev);
-                    if (prev <= 1) {
-                        console.log(
-                            "Auto-recording timer reached 0, stopping recording"
-                        );
-                        clearInterval(intervalId);
-                        setRecordingIntervalId(null);
-                        // Always call stopRecording when timer reaches 0
-                        stopRecording();
-                        setIsAutoRecording(false);
-                        setAutoRecordingTime(0);
-                        setAutoRecordingTriggered(false);
-                        setAutoRecordingCompleted(true); // Mark auto-recording as completed
-                        // Update ref immediately to prevent race conditions
-                        autoRecordingCompletedRef.current = true;
-                        autoRecordingTriggeredRef.current = false;
-                        isAutoRecordingRef.current = false;
-
-                        // Mark the session as completed in Firestore
-                        try {
-                            const sessionRef = doc(
-                                db,
-                                "sessions",
-                                currentSession
-                            );
-                            updateDoc(sessionRef, { status: "completed" });
-                        } catch (e) {
-                            console.warn("Failed to update session status:", e);
-                        }
-
-                        // Upload the recording to session after a short delay to ensure recording is processed
-                        setTimeout(() => {
-                            uploadSessionRecording();
-                        }, 500);
-                        return 0;
-                    }
-                    return prev - 1;
-                });
-            }, 1000);
-
-            setRecordingIntervalId(intervalId);
-        }
-    };
-
-    const uploadSessionRecording = async () => {
-        if (!audioBlob || !currentSession) return;
-
-        try {
-            const fileName = generateAudioFileName(
-                currentSession,
-                username,
-                sessionStartTimeData
-            );
-            const audioRef = ref(storage, `sessions/${fileName}`);
-
-            await uploadBytes(audioRef, audioBlob);
-            const audioUrl = await getDownloadURL(audioRef);
-
-            // Instead of storing recordings array in session doc (removed), append an event
-            const sessionRef = doc(db, "sessions", currentSession);
-            try {
-                await updateDoc(sessionRef, {
+                    participants: updated,
                     events: arrayUnion({
-                        type: "recording_uploaded",
+                        type: "left",
                         by: username.trim() || "Anonymous",
                         timestamp: new Date().toISOString(),
                     }),
                 });
-            } catch (e) {
-                console.warn("Failed to append recording event:", e);
             }
-
-            alert("Recording uploaded and event logged successfully!");
-        } catch (error) {
-            console.error("Error uploading session recording:", error);
-            alert("Failed to upload recording to session.");
-        }
-    };
-
-    // Check Firebase configuration
-    const checkFirebaseConfig = () => {
-        const config = {
-            apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
-            authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
-            projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
-            storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
-            messagingSenderId: import.meta.env
-                .VITE_FIREBASE_MESSAGING_SENDER_ID,
-            appId: import.meta.env.VITE_FIREBASE_APP_ID,
-        };
-
-        console.log("Firebase Config Check:", {
-            hasApiKey: !!config.apiKey,
-            hasAuthDomain: !!config.authDomain,
-            hasProjectId: !!config.projectId,
-            hasStorageBucket: !!config.storageBucket,
-            hasMessagingSenderId: !!config.messagingSenderId,
-            hasAppId: !!config.appId,
-        });
-
-        const missingConfigs = Object.entries(config)
-            .filter(([key, value]) => !value || value.includes("your_"))
-            .map(([key]) => key);
-
-        if (missingConfigs.length > 0) {
-            console.error("Missing Firebase configuration:", missingConfigs);
-            return false;
+        } catch (err) {
+            console.warn("Error updating session on leave:", err);
         }
 
-        return true;
-    };
-
-    // Reset UI back to session creation/join state after a successful save
-    const resetAfterSave = () => {
-        // Clear session-related state so UI returns to initial create/join view
+        stopHornListener();
         setCurrentSession(null);
+        sessionIdRef.current = null;
         setIsInSession(false);
         setSessionId("");
         setSessionName("");
-        setSessionStartTime(getCurrentTimePlusFive());
-        setSessionStartTimeData(null);
         setSessionParticipants([]);
-
-        // Reset auto-recording state
-        setAutoRecordCountdown(0);
-        setIsAutoRecording(false);
-        setAutoRecordingTime(0);
-        setAutoRecordingTriggered(false);
-        setAutoRecordingCompleted(false);
-
-        // Reset refs to match state
-        isAutoRecordingRef.current = false;
-        autoRecordCountdownRef.current = 0;
-        autoRecordingCompletedRef.current = false;
-        autoRecordingTriggeredRef.current = false;
-
-        // Stop and clear any intervals
-        if (countdownIntervalId) {
-            clearInterval(countdownIntervalId);
-            setCountdownIntervalId(null);
-        }
-        if (recordingIntervalId) {
-            clearInterval(recordingIntervalId);
-            setRecordingIntervalId(null);
-        }
-
-        // Clear audio state
-        if (audioUrl) {
-            try {
-                URL.revokeObjectURL(audioUrl);
-            } catch (e) {
-                // ignore
-            }
-        }
-        setAudioBlob(null);
-        setAudioUrl(null);
-        setAudioChunks([]);
+        recordingStartedRef.current = false;
+        clearRecording();
+        setHornStatus("");
     };
 
-    const saveToDatabase = async () => {
-        if (!location) {
-            setSaveMessage("Please get your location first!");
-            return;
-        }
+    // --------------------------
+    // EFFECTS
+    // --------------------------
+    useEffect(() => {
+        detectDeviceInfo();
+        return () => {
+            stopHornListener();
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
-        if (!currentSession) {
-            setSaveMessage("You must be in an active session to save data.");
-            return;
-        }
-
-        if (!username.trim()) {
-            setSaveMessage("Please enter a username!");
-            return;
-        }
-
-        setSaving(true);
-        setSaveMessage("");
-
-        try {
-            let audioUrl = null;
-
-            // Upload audio file if available
-            if (audioBlob) {
-                console.log("Starting audio upload...", {
-                    blobSize: audioBlob.size,
-                    blobType: audioBlob.type,
-                    username: username.trim(),
-                });
-
-                // Create filename using the new format: session_name_user_name_date_time[h:m]
-                const audioFileName = generateAudioFileName(
-                    currentSession || "general",
-                    username,
-                    sessionStartTimeData
-                );
-                const audioRef = ref(storage, `audio/${audioFileName}`);
-
-                console.log("Uploading to Firebase Storage:", audioFileName);
-                await uploadBytes(audioRef, audioBlob);
-                console.log("Audio uploaded successfully");
-
-                audioUrl = await getDownloadURL(audioRef);
-                console.log("Audio URL generated:", audioUrl);
-            }
-
-            // Build minimal participant entry
-            const participantEntry = {
-                username: username.trim(),
-                deviceName: editableName.trim() || deviceInfo.name,
-                joinedAt: new Date().toISOString(),
-                location: {
-                    latitude: location.latitude,
-                    longitude: location.longitude,
-                    accuracy: location.accuracy,
-                    timestamp: location.timestamp,
-                },
-                audioUrl: audioUrl || null,
-            };
-
-            // Merge into the current session document
-            const sessionRef = doc(db, "sessions", currentSession);
-            const sessionSnap = await getDoc(sessionRef);
-
-            if (!sessionSnap.exists()) {
-                // Create minimal session doc if missing
-                await setDoc(sessionRef, {
-                    name: currentSession,
-                    createdAt: serverTimestamp(),
-                    participants: [participantEntry],
-                    events: [
-                        {
-                            type: "saved",
-                            by: username.trim() || "Anonymous",
-                            timestamp: new Date().toISOString(),
-                        },
-                        // If audio was provided, log a recording_uploaded event
-                        ...(audioUrl
-                            ? [
-                                    {
-                                        type: "recording_uploaded",
-                                        by: username.trim() || "Anonymous",
-                                        timestamp: new Date().toISOString(),
-                                    },
-                                ]
-                            : []),
-                    ],
-                    // recordings intentionally omitted
-                });
-            } else {
-                const existing = sessionSnap.data();
-                const participants = existing.participants || [];
-                const idx = participants.findIndex(
-                    (p) => p.username === (username.trim() || "Anonymous")
-                );
-
-                if (idx >= 0) {
-                    // replace with minimal info
-                    participants[idx] = {
-                        username: username.trim(),
-                        deviceName: participantEntry.deviceName,
-                        joinedAt:
-                            participants[idx].joinedAt ||
-                            participantEntry.joinedAt,
-                        location: participantEntry.location,
-                        audioUrl: participantEntry.audioUrl,
-                    };
-                } else {
-                    participants.push(participantEntry);
-                }
-
-                // update participants array and append recording (if any)
-                // Update participants; if audioUrl exists, append a recording_uploaded event
-                await updateDoc(sessionRef, {
-                    participants,
-                    ...(audioUrl
-                        ? {
-                                events: arrayUnion({
-                                    type: "recording_uploaded",
-                                    by: username.trim() || "Anonymous",
-                                    timestamp: new Date().toISOString(),
-                                }),
-                            }
-                        : {}),
-                });
-            }
-
-            setSaveMessage(
-                "✅ Location and audio saved into session successfully!"
-            );
-            // After a brief pause so the user sees the confirmation, reset UI back to create/join
-            setTimeout(() => {
-                resetAfterSave();
-                setSaveMessage("");
-            }, 1500);
-        } catch (error) {
-            console.error("Error saving location:", error);
-
-            // More specific error messages
-            let errorMessage = "❌ Failed to save location.";
-
-            if (error.code === "storage/unauthorized") {
-                errorMessage =
-                    "❌ Storage access denied. Check Firebase Storage rules.";
-            } else if (error.code === "storage/canceled") {
-                errorMessage = "❌ Upload was canceled.";
-            } else if (error.code === "storage/unknown") {
-                errorMessage =
-                    "❌ Unknown storage error. Check Firebase config.";
-            } else if (error.code === "storage/invalid-argument") {
-                errorMessage = "❌ Invalid audio file format.";
-            } else if (error.code === "storage/object-not-found") {
-                errorMessage = "❌ Storage object not found.";
-            } else if (
-                error.message.includes("CORS") ||
-                error.message.includes("cors")
-            ) {
-                errorMessage =
-                    "❌ CORS Error: Update Firebase Storage rules to allow public access.";
-            } else if (error.message.includes("Firebase")) {
-                errorMessage = `❌ Firebase error: ${error.message}`;
-            } else if (error.message.includes("network")) {
-                errorMessage =
-                    "❌ Network error. Check your internet connection.";
-            } else {
-                errorMessage = `❌ Error: ${error.message}`;
-            }
-
-            setSaveMessage(errorMessage);
-        } finally {
-            setSaving(false);
-        }
-    };
-
+    // --------------------------
+    // RENDER
+    // --------------------------
     return (
         <div className="app">
             <header className="app-header">
-                <h1>📍 Location & Audio Recorder</h1>
-                <p>Get your current coordinates and record audio</p>
+                <h1>🔊 Horn-Triggered Session Recorder</h1>
+                <p>
+                    Create or join a session, then blast the horn twice (within
+                    2 seconds) to start a 15s recording. Recording is saved as
+                    WAV and the session ends automatically.
+                </p>
             </header>
 
             <main className="main-content">
-                {/* Get Location button removed; location is requested during Create/Join flows */}
-
-                {/* Inline clock placed below Get Location button */}
-                <div className="app-clock" aria-hidden="true">
-                    <div className="clock-badge">
-                        <span>🕒</span>
-                        <span className="clock-time">
-                            {currentTime.toLocaleTimeString()}
-                        </span>
-                    </div>
-                </div>
-
-                {/* Session Management Section */}
                 <div className="session-section">
                     <h3>🎯 Session Management</h3>
 
@@ -1172,6 +863,7 @@ function App() {
                                         className="form-input"
                                     />
                                 </div>
+
                                 <div className="form-group">
                                     <label htmlFor="creator-username">
                                         Your Username:
@@ -1187,28 +879,22 @@ function App() {
                                         className="form-input"
                                     />
                                 </div>
+
                                 <div className="form-group">
-                                    <label htmlFor="session-start-time">
-                                        Start Time (24-hour format):
+                                    <label htmlFor="device-name">
+                                        Device Name:
                                     </label>
                                     <input
-                                        type="time"
-                                        id="session-start-time"
-                                        value={
-                                            sessionStartTime ||
-                                            getCurrentTimePlusFive()
-                                        }
+                                        type="text"
+                                        id="device-name"
+                                        value={editableName}
                                         onChange={(e) =>
-                                            setSessionStartTime(e.target.value)
+                                            setEditableName(e.target.value)
                                         }
-                                        placeholder={getCurrentTimePlusFive()}
                                         className="form-input"
                                     />
-                                    <small className="time-hint">
-                                        Default: {getCurrentTimePlusFive()}{" "}
-                                        (current time + 5 min)
-                                    </small>
                                 </div>
+
                                 <div className="session-buttons">
                                     <button
                                         className="session-btn create"
@@ -1231,10 +917,11 @@ function App() {
                                         onChange={(e) =>
                                             setSessionId(e.target.value)
                                         }
-                                        placeholder="Enter session name"
+                                        placeholder="Enter existing session name"
                                         className="form-input"
                                     />
                                 </div>
+
                                 <div className="form-group">
                                     <label htmlFor="join-username">
                                         Your Username:
@@ -1250,6 +937,22 @@ function App() {
                                         className="form-input"
                                     />
                                 </div>
+
+                                <div className="form-group">
+                                    <label htmlFor="join-device-name">
+                                        Device Name:
+                                    </label>
+                                    <input
+                                        type="text"
+                                        id="join-device-name"
+                                        value={editableName}
+                                        onChange={(e) =>
+                                            setEditableName(e.target.value)
+                                        }
+                                        className="form-input"
+                                    />
+                                </div>
+
                                 <button
                                     className="session-btn join"
                                     onClick={joinSession}
@@ -1263,77 +966,33 @@ function App() {
                             <div className="session-info">
                                 <h4>📡 Active Session</h4>
                                 <p>
-                                    <strong>Session Name / ID:</strong>{" "}
-                                    {currentSession}
+                                    <strong>Session:</strong>{" "}
+                                    {currentSession || sessionIdRef.current}
                                 </p>
                                 <p>
-                                    <strong>Participants:</strong>{" "}
-                                    {
-                                        sessionParticipants.filter(
-                                            (p) => p.isActive
-                                        ).length
-                                    }
+                                    <strong>User:</strong>{" "}
+                                    {username || "Anonymous"}
                                 </p>
-                                {/* Current time removed per request */}
                                 <p>
-                                    <strong>Scheduled Time:</strong>{" "}
-                                    {sessionStartTimeData
-                                        ? new Date(
-                                              sessionStartTimeData
-                                          ).toLocaleTimeString()
-                                        : "Loading..."}
+                                    <strong>Device:</strong>{" "}
+                                    {editableName || deviceInfo.name}
                                 </p>
-
-                                {autoRecordingCompleted ? (
-                                    <div className="session-completed">
-                                        <h4>✅ Session Completed</h4>
-                                        <p>
-                                            The scheduled recording has
-                                            finished. You can schedule a new
-                                            session to record again.
-                                        </p>
-                                    </div>
-                                ) : (
-                                    <>
-                                        {autoRecordCountdown > 0 && (
-                                            <div className="countdown">
-                                                <h4>
-                                                    ⏰ Auto-Recording in:{" "}
-                                                    {autoRecordCountdown}s
-                                                </h4>
-                                            </div>
-                                        )}
-
-                                        {autoRecordCountdown === 0 &&
-                                            sessionStartTimeData &&
-                                            !isAutoRecording && (
-                                                <div className="waiting-status">
-                                                    <h4>
-                                                        ⏳ Waiting for recording
-                                                        time...
-                                                    </h4>
-                                                    <p>
-                                                        Countdown will start 30
-                                                        seconds before scheduled
-                                                        time
-                                                    </p>
-                                                </div>
-                                            )}
-                                    </>
-                                )}
-
-                                {isAutoRecording && (
-                                    <div className="auto-recording">
-                                        <h4>
-                                            🎤 Auto-Recording... (
-                                            {autoRecordingTime}s remaining)
-                                        </h4>
-                                    </div>
-                                )}
+                                <p>
+                                    <strong>Status:</strong>{" "}
+                                    {hornStatus ||
+                                        (isRecording
+                                            ? "🎤 Recording (15s)..."
+                                            : recordingStartedRef.current
+                                            ? "✅ Recording finished."
+                                            : "⏳ Waiting for horn (2 blasts)...")}
+                                </p>
                             </div>
 
                             <div className="participants-list">
                                 <h4>👥 Participants</h4>
+                                {sessionParticipants.length === 0 && (
+                                    <p>No participants yet.</p>
+                                )}
                                 {sessionParticipants.map(
                                     (participant, index) => (
                                         <div
@@ -1352,32 +1011,20 @@ function App() {
                                                     ({participant.deviceName})
                                                 </span>
                                             </div>
-                                            {participant.location && (
-                                                <div className="participant-location">
-                                                    <small>
-                                                        {participant.location.latitude.toFixed(
-                                                            6
-                                                        )}
-                                                        ,{" "}
-                                                        {participant.location.longitude.toFixed(
-                                                            6
-                                                        )}
-                                                    </small>
-                                                    <small>
-                                                        {" "}
-                                                        • joined at{" "}
-                                                        {new Date(
-                                                            participant.joinedAt
-                                                        ).toLocaleTimeString()}
-                                                    </small>
-                                                </div>
-                                            )}
+                                            <div className="participant-location">
+                                                <small>
+                                                    joined at{" "}
+                                                    {participant.joinedAt
+                                                        ? new Date(
+                                                              participant.joinedAt
+                                                          ).toLocaleTimeString()
+                                                        : "unknown"}
+                                                </small>
+                                            </div>
                                         </div>
                                     )
                                 )}
                             </div>
-
-                            {/* Session recordings list removed per request */}
 
                             <button
                                 className="session-btn leave"
@@ -1385,151 +1032,79 @@ function App() {
                             >
                                 🚪 Leave Session
                             </button>
+
+                            {/* Real-time spectrogram while horn listener is active */}
+                            {!isRecording ? (
+                                <div className="spectrogram-wrapper">
+                                    <h4>📈 Live Spectrogram (detection view)</h4>
+                                    <canvas
+                                        id="spectrogram"
+                                        ref={spectrogramCanvasRef}
+                                        width={600}
+                                        height={200}
+                                        style={{
+                                            border: "1px solid #444",
+                                            borderRadius: "6px",
+                                            marginTop: "10px",
+                                            background: "#fff",
+                                            maxWidth: "100%",
+                                        }}
+                                    ></canvas>
+                                    <p className="spectrogram-note">
+                                        Time flows left → right. Frequency
+                                        bottom → top. A red vertical line marks
+                                        the trigger moment.
+                                    </p>
+                                </div>
+                            ) : (
+                                <div className="record-countdown">
+                                    <h3>
+                                        🎤 Recording…{" "}
+                                        {recordCountdown ?? RECORD_SECONDS}s
+                                        remaining
+                                    </h3>
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>
 
-                {/* Audio recording UI removed; playback is now displayed with location before saving */}
-
-                {error && (
-                    <div className="error-message">
-                        <h3>❌ Error</h3>
-                        <p>{error}</p>
+                {/* AUDIO PLAYBACK & STATUS */}
+                {audioBlob && (
+                    <div className="audio-playback">
+                        <h4>🎵 Last Recorded Audio (WAV)</h4>
+                        <audio
+                            controls
+                            src={audioUrl}
+                            className="audio-player"
+                        >
+                            Your browser does not support the audio element.
+                        </audio>
+                        <div className="audio-actions">
+                            <button
+                                className="action-btn"
+                                onClick={clearRecording}
+                                disabled={saving}
+                            >
+                                🗑️ Clear Recording
+                            </button>
+                        </div>
                     </div>
                 )}
 
-                {location && (
-                    <div className="location-info">
-                        {location.latitude &&
-                        location.longitude &&
-                        location.accuracy &&
-                        location.timestamp &&
-                        audioBlob ? (
-                            <h3>Data Collected:</h3>
-                        ) : null}
-                        <div className="coordinates">
-                            <div className="coordinate-item">
-                                <label>Latitude:</label>
-                                <span className="coordinate-value">
-                                    {location.latitude.toFixed(6)}
-                                </span>
-                                <button
-                                    className="copy-btn"
-                                    onClick={() =>
-                                        copyToClipboard(
-                                            location.latitude.toString()
-                                        )
-                                    }
-                                >
-                                    📋
-                                </button>
-                            </div>
-                            <div className="coordinate-item">
-                                <label>Longitude:</label>
-                                <span className="coordinate-value">
-                                    {location.longitude.toFixed(6)}
-                                </span>
-                                <button
-                                    className="copy-btn"
-                                    onClick={() =>
-                                        copyToClipboard(
-                                            location.longitude.toString()
-                                        )
-                                    }
-                                >
-                                    📋
-                                </button>
-                            </div>
-                            <div className="coordinate-item">
-                                <label>Accuracy:</label>
-                                <span className="coordinate-value">
-                                    {location.accuracy.toFixed(2)} meters
-                                </span>
-                            </div>
-                            <div className="coordinate-item">
-                                <label>Timestamp:</label>
-                                <span className="coordinate-value">
-                                    {location.timestamp}
-                                </span>
-                            </div>
-                        </div>
-
-                        <div className="actions">
-                            <button
-                                className="action-btn"
-                                onClick={() =>
-                                    copyToClipboard(
-                                        `${location.latitude}, ${location.longitude}`
-                                    )
-                                }
-                            >
-                                Copy Coordinates
-                            </button>
-                            <button
-                                className="action-btn"
-                                onClick={() =>
-                                    window.open(
-                                        `https://www.google.com/maps?q=${location.latitude},${location.longitude}`,
-                                        "_blank"
-                                    )
-                                }
-                            >
-                                Open in Google Maps
-                            </button>
-                        </div>
-
-                        <>
-                            {audioBlob && (
-                                <div className="audio-playback">
-                                    <h4>🎵 Recorded Audio</h4>
-                                    <audio
-                                        controls
-                                        src={audioUrl}
-                                        className="audio-player"
-                                    >
-                                        Your browser does not support the audio
-                                        element.
-                                    </audio>
-                                    <div className="audio-actions">
-                                        <button
-                                            className="action-btn"
-                                            onClick={clearRecording}
-                                        >
-                                            🗑️ Clear Recording
-                                        </button>
-                                    </div>
-                                </div>
-                            )}
-
-                            <button
-                                className="save-btn"
-                                onClick={saveToDatabase}
-                                disabled={saving}
-                            >
-                                {saving
-                                    ? "Saving..."
-                                    : audioBlob
-                                    ? "💾 Save Location & Audio"
-                                    : "💾 Save/Update Location"}
-                            </button>
-                            {saveMessage && (
-                                <div
-                                    className={`save-message ${
-                                        saveMessage.includes("✅")
-                                            ? "success"
-                                            : "error"
-                                    }`}
-                                >
-                                    {saveMessage}
-                                </div>
-                            )}
-                        </>
+                {saveMessage && (
+                    <div
+                        className={`save-message ${
+                            saveMessage.includes("✅") ? "success" : "error"
+                        }`}
+                    >
+                        {saveMessage}
                     </div>
                 )}
             </main>
 
             <footer className="app-footer">
-                <p>Built with React + Vite</p>
+                <p>Built for horn-triggered, WAV-based multi-device recording</p>
             </footer>
         </div>
     );
